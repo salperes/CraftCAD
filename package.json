@@ -1,0 +1,22 @@
+{
+  "name": "craftcad",
+  "version": "0.1.0",
+  "description": "Lightweight web-based 2D CAD with AutoCAD-style commands, DXF and DWG support",
+  "license": "GPL-3.0-or-later",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --no-warnings test/run.ts"
+  },
+  "dependencies": {
+    "@mlightcad/libredwg-web": "0.7.14"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "vite": "8.3.2"
+  }
+}
