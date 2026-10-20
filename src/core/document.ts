@@ -73,7 +73,13 @@ interface Txn {
   currentLayerAfter?: string;
 }
 
-export type DocListener = (kind: 'entities' | 'layers' | 'all') => void;
+export interface SpaceState {
+  entities: Map<number, Entity>;
+  undo: unknown[];
+  redo: unknown[];
+}
+
+export type DocListener =(kind: 'entities' | 'layers' | 'all') => void;
 
 const cloneLayers = (m: Map<string, Layer>) => new Map([...m].map(([k, l]) => [k, { ...l }]));
 
@@ -87,7 +93,7 @@ export class Drawing implements DocCtx {
   currentLayer = '0';
   currentColor = BYLAYER;
   currentLtype = 'ByLayer';
-  fileName = 'Drawing1.dxf';
+  fileName = 'Drawing1.dwg';
   modified = false;
 
   private nextId = 1;
@@ -296,6 +302,32 @@ export class Drawing implements DocCtx {
 
   get(id: number): Entity | undefined {
     return this.entities.get(id);
+  }
+
+  /** Moves entities to the end (front) or start (back) of the draw order. Not undoable, like DRAWORDER. */
+  reorder(ids: number[], toFront: boolean): void {
+    const set = new Set(ids);
+    const moved = [...this.entities.values()].filter((e) => set.has(e.id));
+    const rest = [...this.entities.values()].filter((e) => !set.has(e.id));
+    const order = toFront ? [...rest, ...moved] : [...moved, ...rest];
+    this.entities = new Map(order.map((e) => [e.id, e]));
+    this.modified = true;
+    this.emit();
+  }
+
+  /**
+   * Swaps the editable entity space (used by the block editor): returns the current
+   * entities and undo history and installs the given ones.
+   */
+  swapSpace(next: SpaceState): SpaceState {
+    if (this.txn) this.commit();
+    const prev: SpaceState = { entities: this.entities, undo: this.undoStack, redo: this.redoStack };
+    this.entities = next.entities;
+    this.undoStack = next.undo as Txn[];
+    this.redoStack = next.redo as Txn[];
+    this.boxCache.clear();
+    this.emit('all');
+    return prev;
   }
 
   /** Bulk-load without undo (used by file import). */

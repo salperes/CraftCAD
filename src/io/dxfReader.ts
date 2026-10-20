@@ -363,7 +363,7 @@ function convEntity(rv: RecView): NewEntity | NewEntity[] | null | undefined {
         rot = Math.atan2(d.y, d.x);
       }
       if (flip && !rv.has(11)) { p = flipX(p); rot = Math.PI - rot; }
-      return { type: 'mtext', p, h: rv.num(40, 2.5), text: textVal, rot, width: rv.num(41), attach: rv.num(71, 1) || 1, style: rv.str(7) || undefined, ...cm };
+      return { type: 'mtext', p, h: rv.num(40, 2.5), text: textVal, rot, width: rv.num(41), attach: rv.num(71, 1) || 1, ls: rv.has(44) ? rv.num(44, 1) || 1 : undefined, style: rv.str(7) || undefined, ...cm };
     }
     case 'SOLID': case 'TRACE': {
       let pts = [rv.pt(10), rv.pt(11), rv.pt(13), rv.pt(12)];

@@ -115,17 +115,30 @@ export function chooseFromList(title: string, items: string[]): Promise<string |
     const m = modal(title, 'small');
     const filter = h('input', { class: 'inp', placeholder: 'Filter…' }) as HTMLInputElement;
     const list = h('div', { class: 'pick-list' });
-    let sel = items[0] ?? null;
+    let sel: string | null = items[0] ?? null;
+    const visible = () => items.filter((i) => i.toLowerCase().includes(filter.value.toLowerCase()));
     const render = () => {
       list.innerHTML = '';
-      for (const it of items.filter((i) => i.toLowerCase().includes(filter.value.toLowerCase()))) {
+      const vis = visible();
+      if (sel === null || !vis.includes(sel)) sel = vis.find((i) => i.toLowerCase() === filter.value.toLowerCase()) ?? vis[0] ?? null;
+      for (const it of vis) {
         const row = h('div', { class: 'pick-item' + (it === sel ? ' active' : '') }, it);
         row.addEventListener('click', () => { sel = it; render(); });
         row.addEventListener('dblclick', () => { m.close(); resolve(it); });
         list.append(row);
       }
     };
-    filter.addEventListener('input', render);
+    filter.addEventListener('input', () => { sel = null; render(); });
+    filter.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && sel) { e.preventDefault(); m.close(); resolve(sel); }
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const vis = visible();
+        const i = sel ? vis.indexOf(sel) : -1;
+        sel = vis[Math.max(0, Math.min(vis.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))] ?? sel;
+        render();
+      }
+    });
     m.body.append(filter, list);
     render();
     const ok = button('OK', true), cancel = button('Cancel');
@@ -137,11 +150,11 @@ export function chooseFromList(title: string, items: string[]): Promise<string |
   });
 }
 
-export function hatchOptions(ed: Editor): Promise<{ pattern: string; scale: number; angle: number } | null> {
+export function hatchOptions(ed: Editor, init?: { pattern: string; scale: number; angle: number; title?: string }): Promise<{ pattern: string; scale: number; angle: number } | null> {
   return new Promise((resolve) => {
-    const hd = ed.doc.header;
-    const m = modal('Hatch Settings', 'hatch-dlg');
-    let pattern = hd.hatchPattern;
+    const hd = init ? { hatchPattern: init.pattern, hatchScale: init.scale, hatchAngle: init.angle } : ed.doc.header;
+    const m = modal(init?.title ?? 'Hatch Settings', 'hatch-dlg');
+    let pattern = hd.hatchPattern.toUpperCase();
     const grid = h('div', { class: 'pat-grid' });
     const render = () => {
       grid.innerHTML = '';
@@ -168,7 +181,7 @@ export function hatchOptions(ed: Editor): Promise<{ pattern: string; scale: numb
   });
 }
 
-function patternSwatch(name: string): HTMLCanvasElement {
+export function patternSwatch(name: string): HTMLCanvasElement {
   const c = document.createElement('canvas');
   c.width = 48; c.height = 36;
   const g = c.getContext('2d')!;

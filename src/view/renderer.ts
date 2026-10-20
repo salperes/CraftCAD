@@ -8,12 +8,13 @@ import {
 import {
   type Entity, type TextEnt, type MTextEnt, type HatchEnt, type DimEnt, type InsertEnt, type PatLine, type SnapKind,
   TEXT_FONT, textLocalBox, mtextLocalBox, dimGeometry, flattenSpline, forEachInsertInstance, inheritFromInsert,
-  decodeSpecialChars, textUnitWidth, MTEXT_LINE_SPACING, arrowPts, BYBLOCK,
+  decodeSpecialChars, textUnitWidth, arrowPts, BYBLOCK,
 } from '../core/entities.ts';
 import type { Drawing } from '../core/document.ts';
 import { aciToCss, trueColorCss } from '../core/aci.ts';
 import { patternLines } from '../core/patterns.ts';
 import type { Viewport } from './viewport.ts';
+import { GLLayer, GL_TYPES } from './glrenderer.ts';
 
 export const THEME = {
   bg: '#212830',
@@ -45,13 +46,19 @@ interface DrawState {
   inherit?: Inherit;
   depth: number;
   noDash?: boolean;
+  /** Main-scene pass with the WebGL layer active: skip what GL already drew. */
+  skipGL?: boolean;
 }
 
 export interface OverlayState {
   cursor: Vec | null;
   cursorMode: 'idle' | 'point' | 'select' | 'none';
   snap: { kind: SnapKind; p: Vec; label: string } | null;
-  tracking: { from: Vec; to: Vec }[];
+  /** Tracking alignment lines; full = infinite line through 'from' (object snap tracking). */
+  tracking: { from: Vec; to: Vec; full?: boolean }[];
+  /** Object snap tracking points (drawn as small crosses). */
+  acquired: Vec[];
+  trackLabel: string | null;
   window: { a: Vec; b: Vec; crossing: boolean } | null;
   preview: Entity[];
   rubber: { from: Vec; to: Vec } | null;
@@ -61,6 +68,7 @@ export interface OverlayState {
 }
 
 const PICKBOX = 5;
+const BATCHABLE = new Set(['line', 'circle', 'arc', 'polyline', 'ellipse', 'spline']);
 
 export class Renderer {
   main: HTMLCanvasElement;
@@ -70,6 +78,16 @@ export class Renderer {
   dpr = 1;
   cursorSize = 5; // percent of viewport, like CURSORSIZE
   grid = true;
+  /** Grid spacing (GRIDUNIT) and major line frequency (GRIDMAJOR); adaptive subdivision when zooming. */
+  gridStep = 10;
+  gridMajor = 5;
+  /** Background and color-7 handling (white on dark, black on paper). */
+  bg = THEME.bg;
+  darkBg = true;
+  /** Plot as black only (monochrome.ctb). */
+  mono = false;
+  /** Base line width in device pixels. */
+  baseWidth = 1;
   stats = { drawn: 0, ms: 0 };
 
   constructor(main: HTMLCanvasElement, overlay: HTMLCanvasElement) {
@@ -81,7 +99,9 @@ export class Renderer {
 
   resize(w: number, h: number): void {
     this.dpr = window.devicePixelRatio || 1;
-    for (const c of [this.main, this.overlay]) {
+    this.gl?.resize(w, h, this.dpr);
+    this.glDirty = true;
+    for (const c of [this.main, this.overlay, ...(this.sel ? [this.sel] : [])]) {
       c.width = Math.round(w * this.dpr);
       c.height = Math.round(h * this.dpr);
       c.style.width = w + 'px';
@@ -98,6 +118,69 @@ export class Renderer {
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
   }
 
+  /** Optional WebGL layer for solid curves, and the canvas that holds the selection highlight above it. */
+  gl: GLLayer | null = null;
+  sel: HTMLCanvasElement | null = null;
+  glDirty = true;
+  private rgbCache = new Map<string, [number, number, number]>();
+  private ltCache = new Map<string, boolean>();
+
+  /** Enables the WebGL layer (returns false when WebGL is unavailable). */
+  enableGL(glCanvas: HTMLCanvasElement, selCanvas: HTMLCanvasElement): boolean {
+    const gl = GLLayer.create(glCanvas);
+    if (!gl) return false;
+    this.gl = gl;
+    this.sel = selCanvas;
+    return true;
+  }
+
+  /** True when an entity cannot be drawn by the GL layer (dashed linetype or wide polyline). */
+  private needs2D(e: Entity, inherit: Inherit | undefined, doc: Drawing): boolean {
+    if (e.type === 'polyline' && e.width) return true;
+    const src = inherit ? inheritFromInsert(e, inherit) : e;
+    const key = src.layer + '\u0001' + src.ltype;
+    let v = this.ltCache.get(key);
+    if (v === undefined) {
+      const lt = doc.effectiveLtype(src);
+      v = !!lt && lt.pattern.length > 0;
+      this.ltCache.set(key, v);
+    }
+    return v;
+  }
+
+  private toRgb(css: string): [number, number, number] {
+    let c = this.rgbCache.get(css);
+    if (!c) {
+      const m = /rgb\((\d+),(\d+),(\d+)\)/.exec(css);
+      if (m) c = [+m[1] / 255, +m[2] / 255, +m[3] / 255];
+      else {
+        const hx = css.replace('#', '');
+        c = [parseInt(hx.slice(0, 2), 16) / 255, parseInt(hx.slice(2, 4), 16) / 255, parseInt(hx.slice(4, 6), 16) / 255];
+      }
+      this.rgbCache.set(css, c);
+    }
+    return c;
+  }
+
+  /** Rebuilds GL buffers if the drawing changed or the zoom moved far from the tessellation scale. */
+  private updateGL(doc: Drawing, v: Viewport): void {
+    const gl = this.gl!;
+    const ratio = gl.builtScale ? v.scale / gl.builtScale : 0;
+    if (this.glDirty || ratio > 4 || ratio < 0.25) {
+      this.ltCache.clear();
+      gl.build(doc, v.scale, {
+        color: (e, inh) => {
+          const src = inh ? inheritFromInsert(e, inh) : e;
+          if (inh && !doc.isVisible(src)) return null;
+          return this.toRgb(this.colorOf(src, doc, undefined));
+        },
+        needs2D: (e, inh) => this.needs2D(e, inh, doc),
+      });
+      this.glDirty = false;
+    }
+    gl.draw(v);
+  }
+
   // -------------------------------------------------------------------------
   // Main scene
 
@@ -105,7 +188,7 @@ export class Renderer {
     const t0 = performance.now();
     const ctx = this.mctx;
     this.setScreen(ctx);
-    ctx.fillStyle = THEME.bg;
+    ctx.fillStyle = this.bg;
     ctx.fillRect(0, 0, v.w, v.h);
     if (this.grid) this.drawGrid(ctx, v);
     this.setWorld(ctx, v);
@@ -114,25 +197,64 @@ export class Renderer {
     const vis = v.visibleBox(2);
     const px = v.px(1);
     let drawn = 0;
+    this.styleCache.clear();
+    const useGL = !!this.gl;
+    if (useGL) this.updateGL(doc, v);
+    this.ltCache.clear();
+    const st: DrawState = { px, widthPx: this.baseWidth, depth: 0, skipGL: useGL };
+    // Consecutive simple curves with the same resolved style share one path and one stroke.
+    let batch: string | null = null;
+    const flush = () => {
+      if (batch !== null) { ctx.stroke(); batch = null; }
+    };
     for (const e of doc.entities.values()) {
       if (!doc.isVisible(e)) continue;
       const b = doc.box(e);
       if (boxValid(b) && !boxIntersects(b, vis)) continue;
+      drawn++;
+      if (useGL && GL_TYPES.has(e.type) && !this.needs2D(e, undefined, doc)) continue;
       // Sub-pixel entities: draw as a dot.
       if (boxValid(b) && b.maxX - b.minX < px && b.maxY - b.minY < px && e.type !== 'text' && e.type !== 'mtext') {
-        ctx.fillStyle = this.colorOf(e, doc, undefined);
+        const s = this.resolveStyle(e, doc, st);
+        if (!s) continue;
+        flush();
+        ctx.fillStyle = s.css;
         ctx.fillRect(b.minX, b.minY, px, px);
-        drawn++;
         continue;
       }
-      this.drawEntity(ctx, e, doc, { px, widthPx: 1, depth: 0 });
-      drawn++;
+      if (BATCHABLE.has(e.type) && !(e.type === 'polyline' && e.width && e.width > px)) {
+        const s = this.resolveStyle(e, doc, st);
+        if (!s) continue;
+        if (s.key !== batch) {
+          flush();
+          ctx.strokeStyle = s.css;
+          ctx.lineWidth = px * this.baseWidth;
+          ctx.setLineDash(s.dash ?? []);
+          ctx.beginPath();
+          batch = s.key;
+        }
+        this.pathEntity(ctx, e, px);
+        continue;
+      }
+      flush();
+      this.drawEntity(ctx, e, doc, st);
+    }
+    flush();
+    // With GL the highlight goes on its own canvas above the GL lines.
+    let sctx = ctx;
+    if (useGL && this.sel) {
+      sctx = this.sel.getContext('2d')!;
+      this.setScreen(sctx);
+      sctx.clearRect(0, 0, v.w, v.h);
+      this.setWorld(sctx, v);
+      sctx.lineCap = 'round';
+      sctx.lineJoin = 'round';
     }
     if (selection.size) {
       for (const id of selection) {
         const e = doc.get(id);
         if (!e || !doc.isVisible(e)) continue;
-        this.drawEntity(ctx, e, doc, { px, widthPx: 2.2, depth: 0, override: THEME.selection, noDash: true });
+        this.drawEntity(sctx, e, doc, { px, widthPx: 2.2, depth: 0, override: THEME.selection, noDash: true });
       }
     }
     this.stats = { drawn, ms: performance.now() - t0 };
@@ -140,10 +262,12 @@ export class Renderer {
 
   private drawGrid(ctx: CanvasRenderingContext2D, v: Viewport): void {
     // Adaptive grid: minor spacing is a power of 10 (×1, ×5) giving ≥ 10px.
-    let step = 10;
-    while (step * v.scale < 10) step *= step.toString().startsWith('1') ? 5 : 2;
-    while (step * v.scale > 60) step /= step.toString().startsWith('5') ? 5 : 2;
-    const major = step * 5;
+    let step = this.gridStep > 0 ? this.gridStep : 10;
+    // Adaptive: merge or subdivide by the major factor so lines stay 8–8·m px apart.
+    const mf = Math.max(2, this.gridMajor);
+    while (step * v.scale < 8) step *= mf;
+    while (step * v.scale > 8 * mf) step /= mf;
+    const major = step * Math.max(1, this.gridMajor);
     const b = v.visibleBox();
     const drawLines = (s: number, color: string) => {
       if (s * v.scale < 4) return;
@@ -175,29 +299,91 @@ export class Renderer {
     let src = e;
     if (inherit) src = inheritFromInsert(e as Entity, inherit);
     if (src.trueColor !== undefined) return trueColorCss(src.trueColor);
-    if (src.color === BYBLOCK) return aciToCss(7);
+    if (this.mono) return '#000000';
+    if (src.color === BYBLOCK) return aciToCss(7, this.darkBg);
     const c = doc.effectiveColor(src);
-    return c.tc !== undefined ? trueColorCss(c.tc) : aciToCss(c.aci);
+    return c.tc !== undefined ? trueColorCss(c.tc) : aciToCss(c.aci, this.darkBg);
+  }
+
+  /** Per-frame cache of resolved color/linetype by (layer, color, linetype, scale, pixel size). */
+  private styleCache = new Map<string, { css: string; dash: number[] | null; key: string } | null>();
+
+  private resolveStyle(e: Entity, doc: Drawing, st: DrawState): { css: string; dash: number[] | null; key: string } | null {
+    const src = st.inherit ? inheritFromInsert(e, st.inherit) : e;
+    const key = `${src.layer}\u0001${src.color}\u0001${src.trueColor ?? ''}\u0001${src.ltype}\u0001${e.ltscale ?? 1}\u0001${st.px}\u0001${st.depth > 0 ? 1 : 0}\u0001${st.override ?? ''}\u0001${st.noDash ? 1 : 0}`;
+    const hit = this.styleCache.get(key);
+    if (hit !== undefined) return hit;
+    let out: { css: string; dash: number[] | null; key: string } | null = null;
+    if (!(st.depth > 0 && !doc.isVisible(src))) {
+      const css = st.override ?? this.colorOf(src, doc, undefined);
+      let dash: number[] | null = null;
+      if (!st.noDash) {
+        const lt = doc.effectiveLtype(src);
+        if (lt && lt.pattern.length) {
+          const sc = doc.header.ltscale * (e.ltscale ?? 1);
+          const total = lt.pattern.reduce((a, b) => a + Math.abs(b), 0) * sc;
+          if (total / st.px > 4) dash = canvasDash(lt.pattern, sc, st.px);
+        }
+      }
+      out = { css, dash, key };
+    }
+    if (this.styleCache.size > 5000) this.styleCache.clear();
+    this.styleCache.set(key, out);
+    return out;
   }
 
   private applyStyle(ctx: CanvasRenderingContext2D, e: Entity, doc: Drawing, st: DrawState): boolean {
-    const src = st.inherit ? inheritFromInsert(e, st.inherit) : e;
-    if (st.depth > 0 && !doc.isVisible(src)) return false;
-    const css = st.override ?? this.colorOf(src, doc, undefined);
-    ctx.strokeStyle = css;
-    ctx.fillStyle = css;
+    const s = this.resolveStyle(e, doc, st);
+    if (!s) return false;
+    ctx.strokeStyle = s.css;
+    ctx.fillStyle = s.css;
     ctx.lineWidth = st.px * st.widthPx;
-    let dash: number[] | null = null;
-    if (!st.noDash) {
-      const lt = doc.effectiveLtype(src);
-      if (lt && lt.pattern.length) {
-        const sc = doc.header.ltscale * (e.ltscale ?? 1);
-        const total = lt.pattern.reduce((a, b) => a + Math.abs(b), 0) * sc;
-        if (total / st.px > 4) dash = canvasDash(lt.pattern, sc, st.px);
+    ctx.setLineDash(s.dash ?? []);
+    return true;
+  }
+
+  /** Appends a simple curve to the current path (no stroke). */
+  private pathEntity(ctx: CanvasRenderingContext2D, e: Entity, px: number): void {
+    switch (e.type) {
+      case 'line':
+        ctx.moveTo(e.p1.x, e.p1.y); ctx.lineTo(e.p2.x, e.p2.y);
+        break;
+      case 'circle':
+        ctx.moveTo(e.c.x + e.r, e.c.y); ctx.arc(e.c.x, e.c.y, e.r, 0, Math.PI * 2);
+        break;
+      case 'arc':
+        ctx.moveTo(e.c.x + e.r * Math.cos(e.a0), e.c.y + e.r * Math.sin(e.a0)); ctx.arc(e.c.x, e.c.y, e.r, e.a0, e.a1, false);
+        break;
+      case 'polyline':
+        if (e.pts.length >= 2) polyPath(ctx, e.pts, e.bulges, e.closed);
+        break;
+      case 'ellipse': {
+        const rx = Math.hypot(e.major.x, e.major.y);
+        const s = { x: e.c.x + e.major.x * Math.cos(e.a0) - e.major.y * e.ratio * Math.sin(e.a0), y: e.c.y + e.major.y * Math.cos(e.a0) + e.major.x * e.ratio * Math.sin(e.a0) };
+        ctx.moveTo(s.x, s.y);
+        ctx.ellipse(e.c.x, e.c.y, rx, rx * e.ratio, angleOf(e.major), e.a0, e.a1, false);
+        break;
+      }
+      case 'spline': {
+        const pts = this.splinePts(e, px);
+        if (pts.length < 2) break;
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        if (e.closed) ctx.closePath();
+        break;
       }
     }
-    ctx.setLineDash(dash ?? []);
-    return true;
+  }
+
+  /** Flattened spline points cached per entity and zoom octave (tolerance ≈ ½ px). */
+  private splineCache = new WeakMap<object, { tol: number; pts: Vec[] }>();
+  private splinePts(e: Entity & { type: 'spline' }, px: number): Vec[] {
+    const tol = 2 ** Math.floor(Math.log2(px * 0.5));
+    const hit = this.splineCache.get(e);
+    if (hit && hit.tol === tol) return hit.pts;
+    const pts = flattenSpline(e, tol);
+    this.splineCache.set(e, { tol, pts });
+    return pts;
   }
 
   drawEntity(ctx: CanvasRenderingContext2D, e: Entity, doc: Drawing, st: DrawState): void {
@@ -238,7 +424,7 @@ export class Renderer {
         break;
       }
       case 'spline': {
-        const pts = flattenSpline(e, st.px * 0.5);
+        const pts = this.splinePts(e, st.px);
         if (pts.length < 2) break;
         ctx.beginPath();
         ctx.moveTo(pts[0].x, pts[0].y);
@@ -303,32 +489,45 @@ export class Renderer {
 
   private drawMText(ctx: CanvasRenderingContext2D, e: MTextEnt, st: DrawState): void {
     const lb = mtextLocalBox(e);
-    const lh = e.h * MTEXT_LINE_SPACING;
-    const col = (e.attach - 1) % 3;
     const small = e.h / st.px < 1.2;
+    const base = ctx.fillStyle;
     ctx.save();
     ctx.setLineDash([]);
     ctx.translate(e.p.x, e.p.y);
     ctx.rotate(e.rot);
-    lb.lines.forEach((line, i) => {
-      if (!line) return;
-      const w = textUnitWidth(line) * e.h;
-      const x = col === 0 ? lb.x0 : col === 1 ? -w / 2 : -w;
-      const y = lb.y1 - e.h - i * lh;
+    for (const pl of lb.lines) {
       if (small) {
-        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + w, y); ctx.stroke();
-        return;
+        const w = pl.line.width * e.h;
+        if (w > 0) { ctx.beginPath(); ctx.moveTo(pl.x, pl.y); ctx.lineTo(pl.x + w, pl.y); ctx.stroke(); }
+        continue;
       }
-      ctx.save();
-      ctx.translate(x, y);
-      const k = e.h / 70;
-      ctx.scale(k, -k);
-      ctx.font = `100px ${TEXT_FONT}`;
-      ctx.textBaseline = 'alphabetic';
-      ctx.fillText(line, 0, 0);
-      ctx.restore();
-    });
+      let x = pl.x;
+      for (const r of pl.line.runs) {
+        const h = e.h * r.hf;
+        const w = textUnitWidth(r.text, r) * h;
+        const color = r.color !== undefined && !st.override && !this.mono ? aciToCss(r.color, this.darkBg) : base;
+        ctx.fillStyle = color;
+        ctx.strokeStyle = color;
+        ctx.save();
+        ctx.translate(x, pl.y);
+        const k = h / 70;
+        ctx.scale(k, -k);
+        ctx.font = `${r.italic ? 'italic ' : ''}${r.bold ? 'bold ' : ''}100px ${TEXT_FONT}`;
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillText(r.text, 0, 0);
+        ctx.restore();
+        if (r.underline || r.overline) {
+          ctx.beginPath();
+          if (r.underline) { ctx.moveTo(x, pl.y - h * 0.2); ctx.lineTo(x + w, pl.y - h * 0.2); }
+          if (r.overline) { ctx.moveTo(x, pl.y + h * 1.2); ctx.lineTo(x + w, pl.y + h * 1.2); }
+          ctx.lineWidth = st.px * st.widthPx;
+          ctx.stroke();
+        }
+        x += w;
+      }
+    }
     ctx.restore();
+    ctx.fillStyle = base;
   }
 
   private drawHatch(ctx: CanvasRenderingContext2D, e: HatchEnt, _doc: Drawing, st: DrawState): void {
@@ -414,7 +613,7 @@ export class Renderer {
     const blk = e.block ? doc.blocks.get(e.block) : undefined;
     const inherit: Inherit = st.inherit ? inheritFromInsert(e, st.inherit) : e;
     if (blk) {
-      for (const be of blk.entities) this.drawEntity(ctx, be, doc, { ...st, inherit, depth: st.depth + 1 });
+      for (const be of blk.entities) this.drawEntity(ctx, be, doc, { ...st, inherit, depth: st.depth + 1, skipGL: false });
       return;
     }
     const g = dimGeometry(e, doc.dimStyle);
@@ -445,12 +644,31 @@ export class Renderer {
         const cst: DrawState = { ...st, px: st.px / sc, inherit, depth: st.depth + 1 };
         for (const be of blk.entities) {
           if (be.type === 'text' && be.tag !== undefined) continue; // ATTDEF inside block
+          if (st.skipGL && GL_TYPES.has(be.type) && !this.needs2D(be, inherit, doc)) continue;
           this.drawEntity(ctx, be, doc, cst);
         }
         ctx.restore();
       });
     }
     for (const a of e.attribs) this.drawEntity(ctx, a, doc, { ...st, depth: st.depth + 1, inherit: st.inherit });
+  }
+
+  /** Renders the drawing into an off-screen canvas for plotting. */
+  plotTo(canvas: HTMLCanvasElement, doc: Drawing, v: Viewport, o: { mono: boolean; lineWidthPx: number }): void {
+    const saved = { mctx: this.mctx, dpr: this.dpr, bg: this.bg, darkBg: this.darkBg, mono: this.mono, grid: this.grid, baseWidth: this.baseWidth, gl: this.gl };
+    this.gl = null;
+    this.mctx = canvas.getContext('2d', { alpha: false })!;
+    this.dpr = 1;
+    this.bg = '#ffffff';
+    this.darkBg = false;
+    this.mono = o.mono;
+    this.grid = false;
+    this.baseWidth = o.lineWidthPx;
+    try {
+      this.render(doc, v, new Set());
+    } finally {
+      Object.assign(this, saved);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -489,11 +707,13 @@ export class Renderer {
     for (const t of o.tracking) {
       const a = v.toScreen(t.from), b = v.toScreen(t.to);
       const d = norm(sub(b, a));
-      const far = add(a, mul(d, Math.max(v.w, v.h) * 2));
+      const span = Math.max(v.w, v.h) * 2;
+      const far = add(a, mul(d, span));
+      const start = t.full ? sub(a, mul(d, span)) : a;
       ctx.strokeStyle = THEME.tracking;
       ctx.lineWidth = 1;
-      ctx.setLineDash([2, 4]);
-      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(far.x, far.y); ctx.stroke();
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath(); ctx.moveTo(start.x, start.y); ctx.lineTo(far.x, far.y); ctx.stroke();
       ctx.setLineDash([]);
       ctx.beginPath(); ctx.moveTo(b.x - 4, b.y - 4); ctx.lineTo(b.x + 4, b.y + 4); ctx.moveTo(b.x - 4, b.y + 4); ctx.lineTo(b.x + 4, b.y - 4); ctx.stroke();
     }
@@ -519,6 +739,16 @@ export class Renderer {
       ctx.strokeRect(x + 0.5, y + 0.5, w, h);
       ctx.setLineDash([]);
     }
+
+    for (const q of o.acquired) {
+      const s = v.toScreen(q);
+      const x = Math.round(s.x) + 0.5, y = Math.round(s.y) + 0.5;
+      ctx.strokeStyle = THEME.tracking;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(x - 5, y); ctx.lineTo(x + 5, y); ctx.moveTo(x, y - 5); ctx.lineTo(x, y + 5); ctx.stroke();
+    }
+    if (o.trackLabel && o.cursor) this.drawLabel(ctx, o.cursor.x + 16, o.cursor.y - 36, o.trackLabel);
 
     if (o.snap) this.drawSnapMarker(ctx, v.toScreen(o.snap.p), o.snap.kind, o.snap.label);
 
@@ -579,6 +809,20 @@ export class Renderer {
       ctx.textBaseline = 'middle';
       ctx.fillText(label, bx + 6, by + 10.5);
     }
+  }
+
+  private drawLabel(ctx: CanvasRenderingContext2D, bx: number, by: number, label: string): void {
+    ctx.font = '12px "Segoe UI", Arial, sans-serif';
+    const w = ctx.measureText(label).width + 12;
+    ctx.fillStyle = 'rgba(45,52,62,0.95)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+    ctx.fillRect(bx, by, w, 20);
+    ctx.strokeRect(bx + 0.5, by + 0.5, w - 1, 19);
+    ctx.fillStyle = '#e8edf3';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, bx + 6, by + 10.5);
   }
 
   private drawUcs(ctx: CanvasRenderingContext2D, v: Viewport): void {

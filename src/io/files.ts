@@ -1,4 +1,4 @@
-// File import/export entry points: DXF directly, DWG via LibreDWG (WebAssembly).
+// DXF import/export entry points (DWG import lives in dwg.ts).
 
 import { Drawing } from '../core/document.ts';
 import type { Entity } from '../core/entities.ts';
@@ -46,42 +46,6 @@ function fixTableInsert(_doc: Drawing, e: Entity): void {
 
 export function openDxf(doc: Drawing, bytes: Uint8Array, fileName: string): LoadResult {
   return loadDxfData(doc, readDxf(bytes), fileName);
-}
-
-// ---------------------------------------------------------------------------
-// DWG via LibreDWG
-
-type LibreDwgApi = { dwg_write_dxf(content: ArrayBuffer | Uint8Array): Uint8Array | null };
-let libPromise: Promise<LibreDwgApi> | null = null;
-
-function loadLibreDwg(): Promise<LibreDwgApi> {
-  if (!libPromise) {
-    // The wasm binary is resolved relative to the package's glue code; Vite bundles it as an asset.
-    libPromise = import('@mlightcad/libredwg-web').then(async (m) => (await m.LibreDwg.create()) as unknown as LibreDwgApi);
-    libPromise.catch(() => { libPromise = null; });
-  }
-  return libPromise;
-}
-
-export async function dwgToDxfBytes(bytes: Uint8Array): Promise<Uint8Array> {
-  const lib = await loadLibreDwg();
-  const out = lib.dwg_write_dxf(bytes);
-  if (!out || out.length === 0) throw new Error('LibreDWG could not convert this DWG file.');
-  return out;
-}
-
-export async function openDwg(doc: Drawing, bytes: Uint8Array, fileName: string): Promise<LoadResult> {
-  const dxf = await dwgToDxfBytes(bytes);
-  const r = loadDxfData(doc, readDxf(dxf), fileName);
-  return r;
-}
-
-export async function openFile(doc: Drawing, file: File): Promise<LoadResult> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  const name = file.name;
-  const head = new TextDecoder('latin1').decode(bytes.subarray(0, 6));
-  if (/^AC10\d\d/.test(head) || /\.dwg$/i.test(name)) return openDwg(doc, bytes, name);
-  return openDxf(doc, bytes, name);
 }
 
 export function saveDxfString(doc: Drawing): string {

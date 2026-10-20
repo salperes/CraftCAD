@@ -187,6 +187,84 @@ if (scenario === 'annot') {
   (await import('node:fs')).writeFileSync('test/out/ui-annot.dxf', dxf);
 }
 
+if (scenario === 'v2') {
+  await page.evaluate(() => { window.craftcad.view.fit({ minX: -20, minY: -90, maxX: 420, maxY: 230 }); window.craftcad.redraw(); });
+  await page.keyboard.press('F3');
+  await cmd('REC', '20,20', '120,100');
+  await cmd('C', '70,60', '25');
+  // Right-click menu (idle) with a cascading submenu
+  const rc = await toS(250, 50);
+  await page.mouse.click(box.x + rc.x, box.y + rc.y, { button: 'right' });
+  await page.waitForTimeout(150);
+  const clip = await page.$('.shortcut-menu .menu-item.has-sub:nth-of-type(3)');
+  await page.hover('.shortcut-menu .menu-item.has-sub >> text=Clipboard');
+  await page.waitForTimeout(150);
+  await shot('v2-rclick');
+  await page.mouse.click(5, 880);
+  void clip;
+  // HATCH: contextual Hatch Creation tab
+  await cmd('H');
+  await page.waitForTimeout(150);
+  await shot('v2-hatchtab');
+  await clickW(30, 30);
+  await enter();
+  // BLOCK + BEDIT
+  await cmd('B', 'Kutu', '20,20');
+  await clickW(70, 35); await clickW(120, 60); await enter();
+  await page.waitForTimeout(100);
+  await cmd('BEDIT', 'Kutu');
+  await page.waitForTimeout(250);
+  await cmd('C', '0,0', '10');
+  await shot('v2-bedit');
+  await cmd('BCLOSE', '');
+  await page.waitForTimeout(150);
+  // MTEXT with the Text Editor tab
+  await cmd('T', '160,100', '300,60');
+  await page.waitForTimeout(150);
+  await page.keyboard.type('Normal ', { delay: 5 });
+  await page.keyboard.press('Control+b');
+  await page.keyboard.type('Kalın', { delay: 5 });
+  await page.keyboard.press('Control+b');
+  await page.keyboard.type(' ve ', { delay: 5 });
+  await page.keyboard.press('Control+i');
+  await page.keyboard.type('italik', { delay: 5 });
+  await page.waitForTimeout(150);
+  await shot('v2-texteditor');
+  await page.keyboard.press('Control+Enter');
+  await page.waitForTimeout(150);
+  console.log('mtext', await page.evaluate(() => [...window.craftcad.doc.entities.values()].filter((e) => e.type === 'mtext').map((e) => e.text).join(' | ')));
+  // Right-click during a command
+  await cmd('L');
+  await clickW(200, -50);
+  const rc2 = await toS(260, -40);
+  await page.mouse.move(box.x + rc2.x, box.y + rc2.y);
+  await page.mouse.click(box.x + rc2.x, box.y + rc2.y, { button: 'right' });
+  await page.waitForTimeout(150);
+  await page.hover('.shortcut-menu .menu-item >> text=Snap Overrides');
+  await page.waitForTimeout(150);
+  await shot('v2-cmdmenu');
+  await page.keyboard.press('Escape');
+  await page.mouse.click(5, 880);
+  await page.keyboard.press('Escape');
+  // Sysvar / GRID / SNAP
+  await cmd('CURSORSIZE', '100');
+  await cmd('GRID', '5');
+  await cmd('SNAP', '2.5');
+  console.log('vars', await page.evaluate(() => JSON.stringify({ cursor: window.craftcad.renderer.cursorSize, grid: window.craftcad.renderer.gridStep, snap: window.craftcad.settings.snapStep, snapOn: window.craftcad.settings.snap })));
+  await cmd('DS');
+  await page.waitForTimeout(150);
+  await shot('v2-dsettings');
+  await page.keyboard.press('Escape');
+  await cmd('PLOT');
+  await page.waitForTimeout(300);
+  await shot('v2-plot');
+  await page.keyboard.press('Escape');
+  await cmd('D');
+  await page.waitForTimeout(200);
+  await shot('v2-dimstyle');
+  await page.keyboard.press('Escape');
+}
+
 if (scenario === 'open') {
   const file = process.argv[5];
   const input = await page.evaluateHandle(() => {

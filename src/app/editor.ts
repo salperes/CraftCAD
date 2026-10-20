@@ -9,7 +9,7 @@ import {
   type Entity, type NewEntity, type SnapKind,
   entPrims, entHit, entGrips, entMoveGrip, entTransform,
 } from '../core/entities.ts';
-import { Drawing } from '../core/document.ts';
+import { Drawing, type SpaceState } from '../core/document.ts';
 import { Viewport } from '../view/viewport.ts';
 import { Renderer, type OverlayState } from '../view/renderer.ts';
 import { findSnap, DEFAULT_SNAPS, type SnapHit } from './snap.ts';
@@ -57,6 +57,15 @@ export interface CommandDef {
   noUndo?: boolean;
 }
 
+export interface MenuItem {
+  label?: string;
+  action?: () => void;
+  sep?: boolean;
+  disabled?: boolean;
+  checked?: boolean;
+  submenu?: MenuItem[];
+}
+
 export interface EditorUI {
   onPrompt(msg: string, keywords: string[]): void;
   onInput(text: string): void;
@@ -67,14 +76,20 @@ export interface EditorUI {
   onCommand(name: string | null): void;
   onDocChanged(): void;
   editText(opts: { initial: string; multiline: boolean; at: Vec; height: number }): Promise<string | null>;
-  contextMenu(screen: Vec, items: { label: string; action: () => void; sep?: boolean }[]): void;
+  contextMenu(screen: Vec, items: MenuItem[]): void;
   openFile(): Promise<void>;
   saveFile(saveAs: boolean): Promise<void>;
   newDrawing(): Promise<void>;
   layerManager(): void;
   properties(show?: boolean): void;
   chooseFromList(title: string, items: string[]): Promise<string | null>;
-  hatchOptions(): Promise<{ pattern: string; scale: number; angle: number } | null>;
+  hatchOptions(init?: { pattern: string; scale: number; angle: number; title?: string }): Promise<{ pattern: string; scale: number; angle: number } | null>;
+  editMText(o: { text: string; h: number; attach: number; width: number; rot: number; at: Vec }): Promise<{ text: string; h: number; attach: number; width: number } | null>;
+  draftingSettings(): void;
+  plot(): Promise<void>;
+  dimStyleManager(): void;
+  quickSelect(): Promise<number[] | null>;
+  about(): void;
 }
 
 export interface Settings {
@@ -88,6 +103,8 @@ export interface Settings {
   snapStep: number;
   dyn: boolean;
   aperture: number;
+  /** Object snap tracking (OTRACK, F11). */
+  otrack: boolean;
 }
 
 const GRIP_MODES = ['STRETCH', 'MOVE', 'ROTATE', 'SCALE', 'MIRROR'] as const;
@@ -105,7 +122,7 @@ export class Editor {
   pending = new Set<number>();
   settings: Settings = {
     osnap: true, osnapModes: new Set(DEFAULT_SNAPS), ortho: false, polar: true, polarInc: 90,
-    grid: true, snap: false, snapStep: 10, dyn: true, aperture: 10,
+    grid: true, snap: false, snapStep: 10, dyn: true, aperture: 10, otrack: true,
   };
 
   input = '';
@@ -124,7 +141,13 @@ export class Editor {
   cursorWorld: Vec = { x: 0, y: 0 };
   cursorPt: Vec = { x: 0, y: 0 };
   snapHit: SnapHit | null = null;
-  tracking: { from: Vec; to: Vec }[] = [];
+  tracking: { from: Vec; to: Vec; full?: boolean }[] = [];
+  /** Object snap tracking: acquired points, hover timer, active alignment and its label. */
+  acquired: { p: Vec; kind: SnapKind }[] = [];
+  private hoverAcq: { p: Vec; kind: SnapKind; t: number; done: boolean } | null = null;
+  private acqTimer = 0;
+  trackLabel: string | null = null;
+  private trackRay: { from: Vec; dir: Vec } | null = null;
   hoverId: number | null = null;
   preview: Entity[] = [];
   private win: { a: Vec; b: Vec; dragged: boolean } | null = null;
@@ -139,7 +162,7 @@ export class Editor {
 
   constructor(main: HTMLCanvasElement, overlay: HTMLCanvasElement) {
     this.renderer = new Renderer(main, overlay);
-    this.doc.on(() => { this.needsRender = true; this.ui?.onDocChanged(); });
+    this.doc.on(() => { this.needsRender = true; this.renderer.glDirty = true; this.ui?.onDocChanged(); });
     const loop = () => {
       if (this.needsRender) {
         this.needsRender = false;
@@ -178,6 +201,10 @@ export class Editor {
 
   async runCommand(name: string, fromUser = true): Promise<void> {
     const def = this.resolveCommand(name);
+    if (!def && this.isSysvar?.(name)) {
+      this.macroQueue = [name.trim().toUpperCase(), ...this.macroQueue];
+      return this.runCommand('SETVAR', fromUser);
+    }
     if (!def) {
       this.print(`Unknown command "${name.toUpperCase()}".  Press F1 for help.`, 'error');
       return;
@@ -188,6 +215,7 @@ export class Editor {
     this.ui.onCommand(def.name);
     this.pickfirst = [...this.selection];
     if (!def.noRepeat) this.lastCommand = def.name;
+    if (fromUser && def.name !== 'GRIP') this.recentCommands = [def.name, ...this.recentCommands.filter((c) => c !== def.name)].slice(0, 20);
     if (!def.noUndo) this.doc.begin(def.name);
     const run = (async () => {
       try {
@@ -208,6 +236,9 @@ export class Editor {
         this.pickfirst = [];
         this.macroQueue = [];
         this.panTool = false;
+        this.acquired = [];
+        this.trackRay = null;
+        this.trackLabel = null;
         this.input = '';
         this.ui.onInput('');
         this.ui.onCommand(null);
@@ -264,6 +295,13 @@ export class Editor {
   macroQueue: string[] = [];
   /** PAN tool active: left-drag pans. */
   panTool = false;
+  /** One-shot object snap override for the next point (empty set = none). */
+  snapOverride: Set<SnapKind> | null = null;
+  recentCommands: string[] = [];
+  /** Sysvar lookup injected by the command module (typing a sysvar name runs SETVAR). */
+  isSysvar?: (name: string) => boolean;
+  /** Active block editor session. */
+  blockEdit: { name: string; saved: SpaceState; viewState: { cx: number; cy: number; scale: number } } | null = null;
 
   /** Runs "CMD;input;input…" — the command followed by pre-answered prompts. */
   async runMacro(macro: string): Promise<void> {
@@ -275,7 +313,7 @@ export class Editor {
 
   getPoint(msg: string, o: PointOpts = {}): Promise<PointResult> {
     return new Promise((resolve, reject) => {
-      this.setPrompt({ kind: 'point', msg, o, resolve: (r) => { if (r.kind === 'point') this.lastPoint = r.p; resolve(r); }, reject }, msg, o.keywords);
+      this.setPrompt({ kind: 'point', msg, o, resolve: (r) => { if (r.kind === 'point') { this.lastPoint = r.p; this.acquired = []; } resolve(r); }, reject }, msg, o.keywords);
     });
   }
 
@@ -423,11 +461,23 @@ export class Editor {
     }
     const kw = o.keywords ? matchKeyword(text, o.keywords) : null;
     if (kw) { this.prompt = null; p.resolve({ kind: 'keyword', kw }); return; }
+    const ov = SNAP_OVERRIDES[text.toUpperCase()];
+    if (ov !== undefined) {
+      this.snapOverride = ov ? new Set([ov]) : new Set();
+      this.print(ov ? `  of (${text.toUpperCase()})` : '  object snap: none');
+      this.updateCursor();
+      return;
+    }
     const pt = parsePoint(text, this.lastPoint);
     if (pt) { this.prompt = null; p.resolve({ kind: 'point', p: pt }); return; }
     const n = parseNumber(text);
     if (n !== null) {
       const direct = o.directDistance ?? !!o.base;
+      if (this.trackRay && o.directDistance !== false) {
+        this.prompt = null;
+        p.resolve({ kind: 'point', p: add(this.trackRay.from, mul(this.trackRay.dir, n)) });
+        return;
+      }
       if (direct && o.base) {
         const a = angleBetween(o.base, this.cursorPt);
         const target = dist(o.base, this.cursorPt) < 1e-12 ? 0 : a;
@@ -490,6 +540,8 @@ export class Editor {
       cursorMode: mode,
       snap: this.snapHit && (p?.kind === 'point') ? this.snapHit : null,
       tracking: this.tracking,
+      acquired: p?.kind === 'point' ? this.acquired.map((a) => a.p) : [],
+      trackLabel: p?.kind === 'point' ? this.trackLabel : null,
       window: this.win ? { a: this.win.a, b: this.win.b, crossing: this.win.b.x < this.win.a.x || !!(p?.kind === 'select' && p.crossingOnly) } : null,
       preview: this.preview,
       rubber: base && p?.kind === 'point' && p.o.rubber ? { from: base, to: this.cursorPt } : null,
@@ -507,16 +559,23 @@ export class Editor {
     const p = this.prompt;
     this.snapHit = null;
     this.tracking = [];
+    this.trackLabel = null;
+    this.trackRay = null;
     let pt = w;
     if (p?.kind === 'point' || (!p && this.hotGrip)) {
       const base = p?.kind === 'point' ? p.o.base ?? null : null;
-      if (this.settings.osnap) {
-        const hit = findSnap(this.doc, w, this.view.px(this.settings.aperture), this.settings.osnapModes, base);
+      const modes = this.snapOverride ?? this.settings.osnapModes;
+      if ((this.settings.osnap || this.snapOverride) && modes.size) {
+        const hit = findSnap(this.doc, w, this.view.px(this.settings.aperture), modes, base);
         if (hit) { this.snapHit = hit; pt = hit.p; }
       }
-      if (!this.snapHit && base) pt = this.constrain(base, w);
+      const tracking = p?.kind === 'point' && this.settings.otrack && this.settings.osnap;
+      if (tracking) this.acquireHover(this.snapHit);
+      const tr = tracking && !this.snapHit ? this.trackPoint(w, base) : null;
+      if (tr) pt = tr;
+      else if (!this.snapHit && base) pt = this.constrain(base, w);
       else if (!this.snapHit && this.settings.snap) pt = this.gridSnap(w);
-      if (!this.snapHit && base && this.settings.snap && !this.tracking.length && !this.settings.ortho) pt = this.gridSnap(pt);
+      if (!this.snapHit && !tr && base && this.settings.snap && !this.tracking.length && !this.settings.ortho) pt = this.gridSnap(pt);
     }
     this.cursorPt = pt;
     // hover highlight
@@ -536,6 +595,77 @@ export class Editor {
     } else if (p?.kind !== 'point') this.preview = [];
     this.ui.onCursor(pt);
     this.redrawOverlay();
+  }
+
+  /** Acquires a snap point for tracking after hovering it briefly; hovering again releases it. */
+  private acquireHover(hit: SnapHit | null): void {
+    if (!hit || hit.kind === 'nea' || hit.kind === 'per' || hit.kind === 'tan') { this.hoverAcq = null; return; }
+    const now = performance.now();
+    const h = this.hoverAcq;
+    if (h && eq(h.p, hit.p, 1e-9)) {
+      if (!h.done && now - h.t >= ACQUIRE_MS) {
+        h.done = true;
+        const i = this.acquired.findIndex((a) => eq(a.p, hit.p, 1e-9));
+        if (i >= 0) this.acquired.splice(i, 1);
+        else {
+          this.acquired.push({ p: hit.p, kind: hit.kind });
+          if (this.acquired.length > 7) this.acquired.shift();
+        }
+      }
+      return;
+    }
+    this.hoverAcq = { p: hit.p, kind: hit.kind, t: now, done: false };
+    clearTimeout(this.acqTimer);
+    this.acqTimer = window.setTimeout(() => this.updateCursor(), ACQUIRE_MS + 20);
+  }
+
+  /**
+   * Aligns the cursor to horizontal/vertical lines through acquired points (and the polar
+   * ray from the base point), snapping to the intersection of two such lines.
+   */
+  private trackPoint(w: Vec, base: Vec | null): Vec | null {
+    const thresh = this.view.px(8);
+    interface TLine { o: Vec; d: Vec; label: string; polar?: boolean }
+    const lines: TLine[] = [];
+    for (const a of this.acquired) {
+      const name = SNAP_NAMES[a.kind] ?? 'Point';
+      lines.push({ o: a.p, d: { x: 1, y: 0 }, label: name }, { o: a.p, d: { x: 0, y: 1 }, label: name });
+    }
+    if (!lines.length) return null;
+    if (base && this.settings.polar) {
+      const inc = rad(this.settings.polarInc);
+      const a = Math.round(Math.atan2(w.y - base.y, w.x - base.x) / inc) * inc;
+      lines.push({ o: base, d: dir(a), label: 'Polar', polar: true });
+    } else if (base && this.settings.ortho) {
+      lines.push({ o: base, d: { x: 1, y: 0 }, label: 'Ortho', polar: true }, { o: base, d: { x: 0, y: 1 }, label: 'Ortho', polar: true });
+    }
+    const near = lines
+      .map((l) => {
+        const t = (w.x - l.o.x) * l.d.x + (w.y - l.o.y) * l.d.y;
+        const q = add(l.o, mul(l.d, t));
+        return { l, t, q, dd: dist(q, w) };
+      })
+      .filter((c) => c.dd < thresh && (!c.l.polar || c.t > 0))
+      .sort((a, b) => a.dd - b.dd);
+    if (!near.length) return null;
+    const best = near[0];
+    // Intersection with a second, non-parallel alignment line near the cursor.
+    for (const c of near.slice(1)) {
+      const den = best.l.d.x * c.l.d.y - best.l.d.y * c.l.d.x;
+      if (Math.abs(den) < 1e-9) continue;
+      const t = ((c.l.o.x - best.l.o.x) * c.l.d.y - (c.l.o.y - best.l.o.y) * c.l.d.x) / den;
+      const x = add(best.l.o, mul(best.l.d, t));
+      if (dist(x, w) > thresh * 1.6) continue;
+      this.tracking = [{ from: best.l.o, to: x, full: !best.l.polar }, { from: c.l.o, to: x, full: !c.l.polar }];
+      this.trackLabel = `${best.l.label} ${trackText(best.l.o, x)}, ${c.l.label} ${trackText(c.l.o, x)}`;
+      this.trackRay = null;
+      return x;
+    }
+    this.tracking = [{ from: best.l.o, to: best.q, full: !best.l.polar }];
+    this.trackLabel = `${best.l.label}: ${trackText(best.l.o, best.q)}`;
+    const len = dist(best.l.o, best.q);
+    this.trackRay = len > 1e-12 ? { from: best.l.o, dir: mul(sub(best.q, best.l.o), 1 / len) } : null;
+    return best.q;
   }
 
   private gridSnap(p: Vec): Vec {
@@ -685,6 +815,7 @@ export class Editor {
     if (p?.kind === 'point') {
       this.prompt = null;
       this.preview = [];
+      this.snapOverride = null;
       p.resolve({ kind: 'point', p: this.cursorPt });
       return;
     }
@@ -717,7 +848,7 @@ export class Editor {
 
   onMouseUp(s: Vec, button: number, shift: boolean): void {
     if (button === 1 || this.panTool) { this.panning = null; return; }
-    if (button === 2) { this.onRightClick(s); return; }
+    if (button === 2) { this.onRightClick(s, shift); return; }
     if (this.win && this.win.dragged) {
       this.win.b = s;
       this.finishWindow(shift);
@@ -750,34 +881,160 @@ export class Editor {
     const id = this.pickAt(s);
     if (id === null) return;
     const e = this.doc.get(id)!;
-    if (e.type === 'text' || e.type === 'mtext') {
-      this.selectIds([id]);
-      void this.runCommand('TEXTEDIT', false);
-      return;
-    }
     this.selectIds([id]);
+    if (e.type === 'text' || e.type === 'mtext' || e.type === 'dimension') { void this.runCommand('TEXTEDIT', false); return; }
+    if (e.type === 'hatch') { void this.runCommand('HATCHEDIT', false); return; }
+    if (e.type === 'insert' && !this.blockEdit) { void this.runMacro(`BEDIT;${e.name}`); return; }
     this.ui.properties(true);
   }
 
-  private onRightClick(s: Vec): void {
-    if (this.prompt) { this.submit(''); return; }
-    const items: { label: string; action: () => void; sep?: boolean }[] = [];
-    if (this.lastCommand) items.push({ label: `Repeat ${this.lastCommand}`, action: () => void this.runCommand(this.lastCommand!) });
-    if (this.selection.size) {
-      items.push({ label: 'Erase', action: () => void this.runCommand('ERASE'), sep: true });
-      items.push({ label: 'Move', action: () => void this.runCommand('MOVE') });
-      items.push({ label: 'Copy Selection', action: () => void this.runCommand('COPY') });
-      items.push({ label: 'Scale', action: () => void this.runCommand('SCALE') });
-      items.push({ label: 'Rotate', action: () => void this.runCommand('ROTATE') });
-      items.push({ label: 'Deselect All', action: () => this.clearSelection(), sep: true });
-      items.push({ label: 'Properties', action: () => this.ui.properties(true) });
-    } else {
-      items.push({ label: 'Undo', action: () => void this.runCommand('UNDO'), sep: true });
-      items.push({ label: 'Redo', action: () => void this.runCommand('REDO') });
-      items.push({ label: 'Pan', action: () => void this.runCommand('PAN'), sep: true });
-      items.push({ label: 'Zoom Extents', action: () => void this.zoomExtents() });
+  // -------------------------------------------------------------------------
+  // Shortcut menus (right click)
+
+  private onRightClick(s: Vec, shift: boolean): void {
+    if (shift) { this.ui.contextMenu(s, this.snapOverrideItems()); return; }
+    const p = this.prompt;
+    if (p) { this.ui.contextMenu(s, this.commandMenu(p)); return; }
+    this.ui.contextMenu(s, this.selection.size ? this.selectionMenu() : this.idleMenu());
+  }
+
+  private run(cmd: string): () => void {
+    return () => void this.runMacro(cmd);
+  }
+
+  private recentItems(): MenuItem[] {
+    return this.recentCommands.slice(0, 10).map((c) => ({ label: c, action: this.run(c) }));
+  }
+
+  private clipboardItems(): MenuItem[] {
+    const sel = this.selection.size > 0;
+    return [
+      { label: 'Cut', action: this.run('CUTCLIP'), disabled: !sel },
+      { label: 'Copy', action: this.run('COPYCLIP'), disabled: !sel },
+      { label: 'Copy with Base Point', action: this.run('COPYBASE'), disabled: !sel },
+      { label: 'Paste', action: this.run('PASTECLIP'), disabled: !this.clipboard },
+      { label: 'Paste as Block', action: this.run('PASTEBLOCK'), disabled: !this.clipboard },
+      { label: 'Paste to Original Coordinates', action: this.run('PASTEORIG'), disabled: !this.clipboard },
+    ];
+  }
+
+  private zoomItems(): MenuItem[] {
+    const c = () => ({ x: this.view.w / 2, y: this.view.h / 2 });
+    return [
+      { label: 'Zoom Extents', action: () => void this.zoomExtents() },
+      { label: 'Zoom Window', action: this.run('ZOOM;W') },
+      { label: 'Zoom Previous', action: () => { if (this.view.previous()) this.redraw(); } },
+      { label: 'Zoom In', action: () => { this.view.zoomAt(c(), 2); this.redraw(); } },
+      { label: 'Zoom Out', action: () => { this.view.zoomAt(c(), 0.5); this.redraw(); } },
+    ];
+  }
+
+  private idleMenu(): MenuItem[] {
+    const items: MenuItem[] = [];
+    if (this.lastCommand) items.push({ label: `Repeat ${this.lastCommand}`, action: this.run(this.lastCommand) });
+    items.push({ label: 'Recent Input', submenu: this.recentItems(), disabled: !this.recentCommands.length });
+    items.push({ sep: true, label: 'Clipboard', submenu: this.clipboardItems() });
+    items.push({ sep: true, label: 'Undo', action: this.run('UNDO'), disabled: !this.doc.canUndo });
+    items.push({ label: 'Redo', action: this.run('REDO'), disabled: !this.doc.canRedo });
+    items.push({ label: 'Pan', action: () => this.startTransparentPan() });
+    items.push({ label: 'Zoom', submenu: this.zoomItems() });
+    items.push({ sep: true, label: 'Select All', action: this.run('SELECTALL') });
+    items.push({ label: 'Quick Select…', action: this.run('QSELECT') });
+    if (this.blockEdit) {
+      items.push({ sep: true, label: 'Save Block', action: this.run('BSAVE') });
+      items.push({ label: 'Close Block Editor', action: this.run('BCLOSE') });
     }
-    this.ui.contextMenu(s, items);
+    items.push({ sep: true, label: 'Drafting Settings…', action: this.run('DSETTINGS') });
+    items.push({ label: 'Plot…', action: this.run('PLOT') });
+    return items;
+  }
+
+  private selectionMenu(): MenuItem[] {
+    const ents = [...this.selection].map((id) => this.doc.get(id)).filter((e): e is Entity => !!e);
+    const one = ents.length === 1 ? ents[0] : null;
+    const items: MenuItem[] = [];
+    if (this.lastCommand) items.push({ label: `Repeat ${this.lastCommand}`, action: this.run(this.lastCommand) });
+    items.push({ label: 'Recent Input', submenu: this.recentItems(), disabled: !this.recentCommands.length });
+    if (one?.type === 'insert' && !this.blockEdit) items.push({ sep: true, label: 'Block Editor', action: this.run(`BEDIT;${one.name}`) });
+    if (one?.type === 'hatch') items.push({ sep: true, label: 'Hatch Edit…', action: this.run('HATCHEDIT') });
+    if (one && (one.type === 'text' || one.type === 'mtext' || one.type === 'dimension')) items.push({ sep: true, label: 'Edit Text…', action: this.run('TEXTEDIT') });
+    items.push({ sep: true, label: 'Clipboard', submenu: this.clipboardItems() });
+    items.push({ sep: true, label: 'Erase', action: this.run('ERASE') });
+    items.push({ label: 'Move', action: this.run('MOVE') });
+    items.push({ label: 'Copy Selection', action: this.run('COPY') });
+    items.push({ label: 'Scale', action: this.run('SCALE') });
+    items.push({ label: 'Rotate', action: this.run('ROTATE') });
+    items.push({ label: 'Mirror', action: this.run('MIRROR') });
+    items.push({
+      label: 'Draw Order', submenu: [
+        { label: 'Bring to Front', action: () => this.doc.reorder([...this.selection], true) },
+        { label: 'Send to Back', action: () => this.doc.reorder([...this.selection], false) },
+      ],
+    });
+    items.push({ sep: true, label: 'Add Selected', action: this.run('ADDSELECTED'), disabled: !one });
+    items.push({ label: 'Select Similar', action: this.run('SELECTSIMILAR') });
+    items.push({ label: 'Deselect All', action: () => this.clearSelection() });
+    items.push({ sep: true, label: 'Quick Select…', action: this.run('QSELECT') });
+    items.push({ label: 'Properties', action: () => this.ui.properties(true) });
+    return items;
+  }
+
+  private commandMenu(p: Prompt): MenuItem[] {
+    const items: MenuItem[] = [
+      { label: 'Enter', action: () => this.submit('') },
+      { label: 'Cancel', action: () => void this.cancel() },
+    ];
+    const kws = p.kind === 'point' ? p.o.keywords ?? [] : p.kind === 'entity' || p.kind === 'text' ? p.keywords : [];
+    if (this.busy === 'GRIP') {
+      items.push({ sep: true, label: 'Stretch', action: () => this.setGripMode(0) });
+      items.push({ label: 'Move', action: () => this.setGripMode(1) });
+      items.push({ label: 'Rotate', action: () => this.setGripMode(2) });
+      items.push({ label: 'Scale', action: () => this.setGripMode(3) });
+      items.push({ label: 'Mirror', action: () => this.setGripMode(4) });
+    }
+    if (kws.length) {
+      items.push({ sep: true, label: kws[0], action: () => this.submit(kwShortcut(kws[0])) });
+      for (const k of kws.slice(1)) items.push({ label: k, action: () => this.submit(kwShortcut(k)) });
+    }
+    if (p.kind === 'select') {
+      items.push({ sep: true, label: 'All', action: () => this.submit('ALL') });
+      items.push({ label: 'Previous', action: () => this.submit('P') });
+      items.push({ label: 'Last', action: () => this.submit('L') });
+      items.push({ label: p.remove ? 'Add' : 'Remove', action: () => this.submit(p.remove ? 'A' : 'R') });
+    }
+    if (p.kind === 'point') items.push({ sep: true, label: 'Snap Overrides', submenu: this.snapOverrideItems() });
+    items.push({ sep: true, label: 'Pan', action: () => this.startTransparentPan() });
+    items.push({ label: 'Zoom', submenu: this.zoomItems() });
+    return items;
+  }
+
+  /** Grip prompts advance the mode on Enter, so step back one before submitting. */
+  private setGripMode(i: number): void {
+    this.gripMode = (i - 1 + GRIP_MODES.length) % GRIP_MODES.length;
+    this.submit('');
+  }
+
+  snapOverrideItems(): MenuItem[] {
+    const pick = (k: SnapKind | 'none') => () => {
+      this.snapOverride = k === 'none' ? new Set() : new Set([k]);
+      this.print(k === 'none' ? 'Object snap: none (once)' : `Object snap override: ${k.toUpperCase()}`);
+      this.updateCursor();
+    };
+    const L: [SnapKind, string][] = [
+      ['end', 'Endpoint'], ['mid', 'Midpoint'], ['int', 'Intersection'], ['cen', 'Center'], ['gcen', 'Geometric Center'],
+      ['qua', 'Quadrant'], ['tan', 'Tangent'], ['per', 'Perpendicular'], ['ins', 'Insert'], ['node', 'Node'], ['nea', 'Nearest'],
+    ];
+    return [
+      ...L.map(([k, label], i) => ({ label, action: pick(k), sep: i === 3 || i === 6 || i === 8 })),
+      { sep: true, label: 'None', action: pick('none') },
+      { sep: true, label: 'Osnap Settings…', action: this.run('DSETTINGS') },
+    ];
+  }
+
+  /** Pan with the left button until Esc/Enter, without interrupting the running command. */
+  startTransparentPan(): void {
+    this.panTool = true;
+    this.print('Press ESC or ENTER to exit pan.');
   }
 
   async zoomExtents(): Promise<void> {
@@ -794,7 +1051,13 @@ export class Editor {
   onKey(ev: KeyboardEvent): boolean {
     const k = ev.key;
     const ctrl = ev.ctrlKey || ev.metaKey;
+    if (this.panTool && this.busy !== 'PAN' && (k === 'Escape' || k === 'Enter' || k === ' ')) {
+      this.panTool = false;
+      this.print('Pan ended.');
+      return true;
+    }
     if (k === 'Escape') {
+      if (this.snapOverride) this.snapOverride = null;
       if (this.win) { this.win = null; this.redrawOverlay(); return true; }
       if (this.input) { this.setInput(''); return true; }
       if (this.busy) { void this.cancel(); return true; }
@@ -810,7 +1073,7 @@ export class Editor {
       if (map[key] && map[key] !== 'PLOT') { void this.runCommand(map[key]); return true; }
       return false;
     }
-    const fkeys: Record<string, keyof Settings> = { F3: 'osnap', F7: 'grid', F8: 'ortho', F9: 'snap', F10: 'polar', F12: 'dyn' };
+    const fkeys: Record<string, keyof Settings> = { F3: 'osnap', F7: 'grid', F8: 'ortho', F9: 'snap', F10: 'polar', F11: 'otrack', F12: 'dyn' };
     if (fkeys[k]) { this.toggle(fkeys[k]); return true; }
     if (k === 'F1') { void this.runCommand('HELP'); return true; }
     if (k === 'F2') { this.ui.print('', 'info'); return true; }
@@ -837,8 +1100,9 @@ export class Editor {
     s[name] = !s[name];
     if (name === 'ortho' && this.settings.ortho) this.settings.polar = false;
     if (name === 'polar' && this.settings.polar) this.settings.ortho = false;
-    const labels: Record<string, string> = { osnap: 'Osnap', grid: 'Grid', ortho: 'Ortho', snap: 'Snap', polar: 'Polar', dyn: 'Dynamic input' };
+    const labels: Record<string, string> = { osnap: 'Osnap', grid: 'Grid', ortho: 'Ortho', snap: 'Snap', polar: 'Polar', dyn: 'Dynamic input', otrack: 'Object Snap Tracking' };
     this.print(`<${labels[name] ?? name} ${s[name] ? 'on' : 'off'}>`);
+    if (name === 'otrack' && !this.settings.otrack) this.acquired = [];
     this.ui.onStatus();
     this.redraw();
     this.updateCursor();
@@ -927,6 +1191,22 @@ export class Editor {
 
 // ---------------------------------------------------------------------------
 // Parsing helpers
+
+const ACQUIRE_MS = 350;
+
+const SNAP_NAMES: Partial<Record<SnapKind, string>> = {
+  end: 'Endpoint', mid: 'Midpoint', cen: 'Center', gcen: 'Geometric Center', qua: 'Quadrant', int: 'Intersection', node: 'Node', ins: 'Insertion',
+};
+
+/** "12.5000 < 90°" relative to the tracking origin. */
+function trackText(o: Vec, p: Vec): string {
+  return `${fmtNum(dist(o, p), 4)} < ${fmtNum(deg(normAng(angleBetween(o, p))), 0)}°`;
+}
+
+const SNAP_OVERRIDES: Record<string, SnapKind | null> = {
+  END: 'end', ENDP: 'end', MID: 'mid', CEN: 'cen', GCE: 'gcen', INT: 'int', QUA: 'qua', PER: 'per', TAN: 'tan',
+  NEA: 'nea', NOD: 'node', NODE: 'node', INS: 'ins', NON: null, NONE: null,
+};
 
 export function parseNumber(s: string): number | null {
   const t = s.trim().replace(/^\+/, '');

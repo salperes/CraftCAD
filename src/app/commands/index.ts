@@ -5,6 +5,7 @@ import * as D from './draw.ts';
 import * as M from './modify.ts';
 import * as A from './annotate.ts';
 import * as U from './misc.ts';
+import * as X from './extra.ts';
 
 const defs: CommandDef[] = [
   // Draw
@@ -68,6 +69,7 @@ const defs: CommandDef[] = [
   { name: 'LTSCALE', aliases: ['LTS'], desc: 'Utility: global linetype scale', fn: U.LTSCALE },
   { name: 'DIMSCALE', desc: 'Utility: dimension scale', fn: U.DIMSCALE },
   { name: 'OSNAP', aliases: ['OS', '-OSNAP'], desc: 'Utility: object snap modes', fn: U.OSNAP, noUndo: true },
+  { name: 'ABOUT', aliases: ['VERSION', 'WHATSNEW'], desc: 'Utility: version and changelog', fn: U.ABOUT, noUndo: true, noRepeat: true },
   { name: 'HELP', aliases: ['?'], desc: 'Utility: list commands', fn: U.HELP, noUndo: true, noRepeat: true },
   // Clipboard
   { name: 'COPYCLIP', desc: 'Clipboard: copy', fn: U.COPYCLIP, noUndo: true, noRepeat: true },
@@ -77,6 +79,24 @@ const defs: CommandDef[] = [
   // Blocks
   { name: 'BLOCK', aliases: ['B', '-B'], desc: 'Block: create block definition', fn: U.BLOCK },
   { name: 'INSERT', aliases: ['I', '-I', 'DDINSERT'], desc: 'Block: insert block', fn: U.INSERT },
+  // Settings & output
+  { name: 'SETVAR', aliases: ['SET'], desc: 'Utility: view or change a system variable', fn: X.SETVAR, noUndo: true },
+  { name: 'GRID', desc: 'Utility: grid spacing and display', fn: X.GRID, noUndo: true },
+  { name: 'SNAP', aliases: ['SN'], desc: 'Utility: snap spacing', fn: X.SNAP, noUndo: true },
+  { name: 'DSETTINGS', aliases: ['DS', 'SE', 'DDRMODES', 'OPTIONS', 'OP'], desc: 'Utility: drafting settings', fn: X.DSETTINGS, noUndo: true },
+  { name: 'PLOT', aliases: ['PRINT'], desc: 'Output: plot to PDF or image', fn: X.PLOT, noUndo: true },
+  { name: 'DIMSTYLE', aliases: ['D', 'DST', 'DDIM'], desc: 'Annotate: dimension style manager', fn: X.DIMSTYLE, noUndo: true },
+  { name: 'HATCHEDIT', aliases: ['HE'], desc: 'Modify: edit hatch pattern, scale and angle', fn: X.HATCHEDIT },
+  { name: 'BEDIT', aliases: ['BE'], desc: 'Block: open the Block Editor', fn: X.BEDIT, noUndo: true, noRepeat: true },
+  { name: 'BSAVE', desc: 'Block: save the block being edited', fn: X.BSAVE, noUndo: true, noRepeat: true },
+  { name: 'BCLOSE', desc: 'Block: close the Block Editor', fn: X.BCLOSE, noUndo: true, noRepeat: true },
+  { name: 'BASE', desc: 'Block: set base point', fn: X.BASE },
+  { name: 'SELECTSIMILAR', desc: 'Utility: select similar objects', fn: X.SELECTSIMILAR, noUndo: true, noRepeat: true },
+  { name: 'ADDSELECTED', desc: 'Utility: create an object like the selected one', fn: X.ADDSELECTED, noUndo: true, noRepeat: true },
+  { name: 'QSELECT', desc: 'Utility: quick select by property', fn: X.QSELECT, noUndo: true, noRepeat: true },
+  { name: 'PASTEORIG', desc: 'Clipboard: paste to original coordinates', fn: X.PASTEORIG, noRepeat: true },
+  { name: 'PASTEBLOCK', desc: 'Clipboard: paste as block', fn: X.PASTEBLOCK, noRepeat: true },
+  { name: 'DRAWORDER', aliases: ['DR'], desc: 'Modify: change draw order', fn: X.DRAWORDER },
   // File
   { name: 'NEW', desc: 'File: new drawing', fn: U.NEW, noUndo: true, noRepeat: true },
   { name: 'OPEN', desc: 'File: open DXF/DWG', fn: U.OPEN, noUndo: true, noRepeat: true },
@@ -86,4 +106,5 @@ const defs: CommandDef[] = [
 
 export function registerCommands(ed: Editor): void {
   for (const d of defs) ed.register(d);
+  X.installSysvars(ed);
 }

@@ -66,9 +66,10 @@ export async function MTEXT(ed: Editor): Promise<void> {
     const b = r.p;
     const width = Math.abs(b.x - a.x);
     const tl = { x: Math.min(a.x, b.x), y: Math.max(a.y, b.y) };
-    const s = await ed.ui.editText({ initial: '', multiline: true, at: tl, height: ht });
-    if (!s) return;
-    ed.doc.add({ type: 'mtext', p: tl, h: ht, text: s.replace(/\r?\n/g, '\\P'), rot, width, attach: 1 });
+    const res = await ed.ui.editMText({ text: '', h: ht, attach: 1, width, rot, at: tl });
+    if (!res || !res.text.replace(/\\P/g, '').trim()) return;
+    h.textsize = res.h;
+    ed.doc.add({ type: 'mtext', p: tl, h: res.h, text: res.text, rot, width: res.width, attach: res.attach });
     return;
   }
 }
@@ -88,9 +89,9 @@ export async function TEXTEDIT(ed: Editor): Promise<void> {
       const s = await ed.ui.editText({ initial: e.text, multiline: false, at: e.p, height: e.h });
       if (s !== null && s !== e.text) ed.doc.update({ ...(e as TextEnt), text: s });
     } else if (e.type === 'mtext') {
-      const plain = (e as MTextEnt).text.replace(/\\P/g, '\n');
-      const s = await ed.ui.editText({ initial: plain, multiline: true, at: e.p, height: e.h });
-      if (s !== null) ed.doc.update({ ...(e as MTextEnt), text: s.replace(/\r?\n/g, '\\P') });
+      const m = e as MTextEnt;
+      const r = await ed.ui.editMText({ text: m.text, h: m.h, attach: m.attach, width: m.width, rot: m.rot, at: m.p });
+      if (r) ed.doc.update({ ...m, text: r.text, h: r.h, attach: r.attach, width: r.width });
     } else if (e.type === 'dimension') {
       const s = await ed.ui.editText({ initial: (e as DimEnt).textOverride ?? '<>', multiline: false, at: (e as DimEnt).loc, height: ed.doc.dimStyle.dimtxt });
       if (s !== null) ed.doc.update({ ...(e as DimEnt), textOverride: s === '<>' ? undefined : s, block: undefined });

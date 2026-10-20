@@ -28,50 +28,75 @@ export interface MenuEntry {
   sep?: boolean;
   checked?: boolean;
   disabled?: boolean;
+  /** Cascading submenu shown on hover. */
+  submenu?: MenuEntry[];
 }
 
-let openMenu: HTMLElement | null = null;
+let openMenus: HTMLElement[] = [];
 
 export function closeMenu(): void {
-  openMenu?.remove();
-  openMenu = null;
+  for (const m of openMenus) m.remove();
+  openMenus = [];
+}
+
+function buildMenu(entries: MenuEntry[], cls: string, level: number): HTMLElement {
+  const m = h('div', { class: `menu ${cls}` });
+  let child: HTMLElement | null = null;
+  const closeChild = () => {
+    if (!child) return;
+    const i = openMenus.indexOf(child);
+    for (const x of openMenus.splice(i)) x.remove();
+    child = null;
+  };
+  for (const e of entries) {
+    if (e.sep) { m.append(h('div', { class: 'menu-sep' })); if (!e.label) continue; }
+    const it = h('div', { class: `menu-item${e.disabled ? ' disabled' : ''}${e.checked ? ' checked' : ''}${e.submenu ? ' has-sub' : ''}` });
+    if (e.html) it.innerHTML = e.html;
+    else {
+      it.append(h('span', { class: 'menu-ico', html: e.icon ?? '' }));
+      it.append(h('span', { class: 'menu-label' }, e.label ?? ''));
+      if (e.submenu) it.append(h('span', { class: 'menu-arrow', html: '&#9656;' }));
+    }
+    it.addEventListener('mousedown', (ev) => { ev.stopPropagation(); ev.preventDefault(); });
+    it.addEventListener('mouseenter', () => {
+      closeChild();
+      if (!e.submenu || e.disabled || !e.submenu.length) return;
+      child = buildMenu(e.submenu, cls, level + 1);
+      const r = it.getBoundingClientRect();
+      place(child, r.right - 2, r.top - 4, r.left);
+    });
+    if (!e.disabled && e.action) it.addEventListener('click', (ev) => { ev.stopPropagation(); closeMenu(); e.action!(); });
+    m.append(it);
+  }
+  document.body.append(m);
+  openMenus.push(m);
+  void level;
+  return m;
+}
+
+function place(m: HTMLElement, x: number, y: number, flipX?: number): void {
+  const mr = m.getBoundingClientRect();
+  if (x + mr.width > window.innerWidth - 4) x = flipX !== undefined ? Math.max(4, flipX - mr.width + 2) : Math.max(4, window.innerWidth - mr.width - 4);
+  if (y + mr.height > window.innerHeight - 4) y = Math.max(4, window.innerHeight - mr.height - 4);
+  m.style.left = x + 'px';
+  m.style.top = y + 'px';
 }
 
 /** Shows a floating menu at screen coordinates (or under an anchor element). */
 export function showMenu(entries: MenuEntry[], at: { x: number; y: number } | HTMLElement, cls = ''): HTMLElement {
   closeMenu();
-  const m = h('div', { class: `menu ${cls}` });
-  for (const e of entries) {
-    if (e.sep) { m.append(h('div', { class: 'menu-sep' })); if (!e.label) continue; }
-    const it = h('div', { class: `menu-item${e.disabled ? ' disabled' : ''}${e.checked ? ' checked' : ''}` });
-    if (e.html) it.innerHTML = e.html;
-    else {
-      it.append(h('span', { class: 'menu-ico', html: e.icon ?? '' }));
-      it.append(h('span', { class: 'menu-label' }, e.label ?? ''));
-    }
-    if (!e.disabled && e.action) {
-      it.addEventListener('mousedown', (ev) => ev.stopPropagation());
-      it.addEventListener('click', (ev) => { ev.stopPropagation(); closeMenu(); e.action!(); });
-    }
-    m.append(it);
-  }
-  document.body.append(m);
-  let x: number, y: number;
+  const m = buildMenu(entries, cls, 0);
   if (at instanceof HTMLElement) {
     const r = at.getBoundingClientRect();
-    x = r.left; y = r.bottom + 1;
-  } else { x = at.x; y = at.y; }
-  const mr = m.getBoundingClientRect();
-  if (x + mr.width > window.innerWidth - 4) x = Math.max(4, window.innerWidth - mr.width - 4);
-  if (y + mr.height > window.innerHeight - 4) y = Math.max(4, (at instanceof HTMLElement ? at.getBoundingClientRect().top - mr.height - 1 : y - mr.height));
-  m.style.left = x + 'px';
-  m.style.top = y + 'px';
-  openMenu = m;
+    const mr = m.getBoundingClientRect();
+    const below = r.bottom + 1 + mr.height <= window.innerHeight - 4;
+    place(m, r.left, below ? r.bottom + 1 : Math.max(4, r.top - mr.height - 1));
+  } else place(m, at.x, at.y);
   return m;
 }
 
 window.addEventListener('mousedown', (ev) => {
-  if (openMenu && !openMenu.contains(ev.target as Node)) closeMenu();
+  if (openMenus.length && !openMenus.some((m) => m.contains(ev.target as Node))) closeMenu();
 });
 window.addEventListener('blur', closeMenu);
 

@@ -64,7 +64,7 @@ const TABS: Tab[] = [
         items: [
           { kind: 'big', btn: b('Text', 'mtext', 'MTEXT', 'Creates multiline text'), menu: TEXT_MENU },
           { kind: 'big', btn: b('Dimension', 'dimension', 'DIMLINEAR', 'Creates dimensions'), menu: DIM_MENU },
-          { kind: 'col', items: [{ btn: b('Leader', 'mleader', 'MLEADER'), label: true }, { btn: b('Edit Text', 'textedit', 'TEXTEDIT'), label: true }] },
+          { kind: 'col', items: [{ btn: b('Leader', 'mleader', 'MLEADER'), label: true }, { btn: b('Edit Text', 'textedit', 'TEXTEDIT'), label: true }, { btn: b('Dim Style', 'dimStyle', 'DIMSTYLE'), label: true }] },
         ],
       },
       {
@@ -79,7 +79,7 @@ const TABS: Tab[] = [
         title: 'Block',
         items: [
           { kind: 'big', btn: b('Insert', 'blockInsert', 'INSERT', 'Inserts a block') },
-          { kind: 'col', items: [{ btn: b('Create', 'blockCreate', 'BLOCK'), label: true }] },
+          { kind: 'col', items: [{ btn: b('Create', 'blockCreate', 'BLOCK'), label: true }, { btn: b('Edit', 'blockEdit', 'BEDIT', 'Opens the Block Editor'), label: true }] },
         ],
       },
       {
@@ -106,7 +106,7 @@ const TABS: Tab[] = [
   {
     name: 'Insert',
     panels: [
-      { title: 'Block', items: [{ kind: 'big', btn: b('Insert', 'blockInsert', 'INSERT') }, { kind: 'big', btn: b('Create Block', 'blockCreate', 'BLOCK') }, { kind: 'big', btn: b('Explode', 'explode', 'EXPLODE') }] },
+      { title: 'Block', items: [{ kind: 'big', btn: b('Insert', 'blockInsert', 'INSERT') }, { kind: 'big', btn: b('Create Block', 'blockCreate', 'BLOCK') }, { kind: 'big', btn: b('Block Editor', 'blockEdit', 'BEDIT', 'Opens the Block Editor') }, { kind: 'big', btn: b('Explode', 'explode', 'EXPLODE') }] },
       { title: 'Import', items: [{ kind: 'big', btn: b('Open DXF/DWG', 'open', 'OPEN', 'Opens a DXF or DWG drawing') }] },
     ],
   },
@@ -119,7 +119,7 @@ const TABS: Tab[] = [
         items: [
           { kind: 'big', btn: b('Linear', 'dimlinear', 'DIMLINEAR') }, { kind: 'big', btn: b('Aligned', 'dimaligned', 'DIMALIGNED') },
           { kind: 'col', items: [{ btn: b('Radius', 'dimradius', 'DIMRADIUS'), label: true }, { btn: b('Diameter', 'dimdiameter', 'DIMDIAMETER'), label: true }, { btn: b('Angular', 'dimangular', 'DIMANGULAR'), label: true }] },
-          { kind: 'col', items: [{ btn: b('Dim Scale', 'scale', 'DIMSCALE'), label: true }] },
+          { kind: 'col', items: [{ btn: b('Dim Style', 'dimStyle', 'DIMSTYLE', 'Dimension Style Manager'), label: true }, { btn: b('Dim Scale', 'scale', 'DIMSCALE'), label: true }] },
         ],
       },
       { title: 'Leaders', items: [{ kind: 'big', btn: b('Multileader', 'mleader', 'MLEADER') }] },
@@ -140,10 +140,17 @@ const TABS: Tab[] = [
     ],
   },
   {
+    name: 'Output',
+    panels: [
+      { title: 'Plot', items: [{ kind: 'big', btn: b('Plot', 'printer', 'PLOT', 'Plots the drawing to PDF (via the browser print dialog) or a PNG image') }] },
+      { title: 'Export', items: [{ kind: 'big', btn: b('Save DXF', 'saveAs', 'SAVEAS') }] },
+    ],
+  },
+  {
     name: 'Manage',
     panels: [
       { title: 'Cleanup', items: [{ kind: 'big', btn: b('Purge', 'purge', 'PURGE', 'Removes unused blocks and layers') }] },
-      { title: 'Settings', items: [{ kind: 'col', items: [{ btn: b('Object Snap', 'osnap', 'OSNAP'), label: true }, { btn: b('Linetype Scale', 'dimlinear', 'LTSCALE'), label: true }] }] },
+      { title: 'Settings', items: [{ kind: 'big', btn: b('Drafting Settings', 'grid', 'DSETTINGS', 'Snap, grid, polar tracking, object snap and dynamic input settings') }, { kind: 'col', items: [{ btn: b('Object Snap', 'osnap', 'OSNAP'), label: true }, { btn: b('Linetype Scale', 'dimlinear', 'LTSCALE'), label: true }, { btn: b('System Variable', 'list', 'SETVAR'), label: true }] }] },
       { title: 'Help', items: [{ kind: 'big', btn: b('Commands', 'help', 'HELP', 'Lists all commands and aliases') }] },
     ],
   },
@@ -158,6 +165,9 @@ export class Ribbon {
   /** Last-used variant per split button (keyed by its default command). */
   private lastVariant = new Map<string, Btn>();
   pickColor!: (initial: number) => Promise<number | null>;
+  private tabIndex = 0;
+  private ctx: { key: string; name: string; build: (body: HTMLElement) => void } | null = null;
+  private ctxTab: HTMLElement | null = null;
 
   constructor(ed: Editor, host: HTMLElement) {
     this.ed = ed;
@@ -175,7 +185,7 @@ export class Ribbon {
   }
 
   show(i: number): void {
-
+    this.tabIndex = i;
     [...this.tabsEl.children].forEach((c, k) => c.classList.toggle('active', k === i));
     this.body.innerHTML = '';
     this.refreshers = [];
@@ -185,6 +195,36 @@ export class Ribbon {
 
   refresh(): void {
     for (const r of this.refreshers) r();
+  }
+
+  /**
+   * Shows a contextual tab (Text Editor, Hatch Creation, Block Editor…) and switches to it;
+   * null removes it and returns to the previous tab.
+   */
+  setContext(ctx: { key: string; name: string; build: (body: HTMLElement) => void } | null): void {
+    if (ctx?.key === this.ctx?.key) return;
+    this.ctx = ctx;
+    this.ctxTab?.remove();
+    this.ctxTab = null;
+    if (!ctx) { this.show(this.tabIndex); return; }
+    const tab = h('div', { class: 'ribbon-tab ctx' }, ctx.name);
+    tab.addEventListener('click', () => this.showContext());
+    this.tabsEl.append(tab);
+    this.ctxTab = tab;
+    this.showContext();
+  }
+
+  /** Rebuilds the contextual tab's panels if it is showing. */
+  refreshContext(): void {
+    if (this.ctx && this.ctxTab?.classList.contains('active')) this.showContext();
+  }
+
+  private showContext(): void {
+    if (!this.ctx) return;
+    [...this.tabsEl.children].forEach((c) => c.classList.toggle('active', c === this.ctxTab));
+    this.body.innerHTML = '';
+    this.refreshers = [];
+    this.ctx.build(this.body);
   }
 
   private run(cmd: string): void {
@@ -397,4 +437,54 @@ function ltypeItemHtml(n: string): string {
 
 export function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+}
+
+// ---------------------------------------------------------------------------
+// Builders for contextual tabs
+
+export function ctxPanel(title: string, ...content: HTMLElement[]): HTMLElement {
+  const el = h('div', { class: 'rpanel' });
+  const c = h('div', { class: 'rpanel-content' });
+  c.append(...content);
+  el.append(c, h('div', { class: 'rpanel-title' }, title));
+  return el;
+}
+
+/** Large button; mousedown is suppressed so an active text editor keeps focus. */
+export function ctxBig(label: string, ico: string, onClick: () => void, cls = ''): HTMLElement {
+  const wrap = h('div', { class: 'rbig ' + cls });
+  const top = h('button', { class: 'rbig-top', html: icon(ico, 32) });
+  const lbl = h('button', { class: 'rbig-label' }, label);
+  for (const x of [top, lbl]) {
+    x.addEventListener('mousedown', (e) => e.preventDefault());
+    x.addEventListener('click', onClick);
+  }
+  wrap.append(top, lbl);
+  return wrap;
+}
+
+export function ctxSmall(label: string, ico: string, onClick: (el: HTMLElement) => void, showLabel = true, active = false): HTMLElement {
+  const wrap = h('div', { class: 'rsmall' + (showLabel ? ' labeled' : '') + (active ? ' pressed' : '') });
+  const main = h('button', { class: 'rsmall-main', html: icon(ico, 18) + (showLabel ? '<span>' + escapeHtml(label) + '</span>' : '') });
+  main.addEventListener('mousedown', (e) => e.preventDefault());
+  main.addEventListener('click', () => onClick(wrap));
+  if (!showLabel) tooltip(wrap, label);
+  wrap.append(main);
+  return wrap;
+}
+
+export function ctxCol(...items: HTMLElement[]): HTMLElement {
+  const c = h('div', { class: 'rcol' });
+  c.append(...items);
+  return c;
+}
+
+export function ctxField(label: string, value: string, onChange: (v: string) => void, width = 70): HTMLElement {
+  const row = h('label', { class: 'ctx-field' }, h('span', {}, label));
+  const inp = h('input', { class: 'inp', value }) as HTMLInputElement;
+  inp.style.width = width + 'px';
+  inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { onChange(inp.value); inp.blur(); } });
+  inp.addEventListener('change', () => onChange(inp.value));
+  row.append(inp);
+  return row;
 }

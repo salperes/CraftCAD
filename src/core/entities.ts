@@ -1,6 +1,7 @@
 // Entity model and the per-entity operations used by the editor (bounds, picking,
 // snapping, grips, transforms, explode). Rendering lives in view/renderer.ts.
 
+import { layoutMText, mtextPlain, type MLine } from './mtext.ts';
 import {
   type Vec, type Box, type Mat, type Prim,
   add, sub, mul, dist, mid, norm, perp, polar, angleOf, angleBetween, dir, dot, cross, rotate,
@@ -43,6 +44,8 @@ export interface TextEnt extends Base {
 }
 export interface MTextEnt extends Base {
   type: 'mtext'; p: Vec; h: number; text: string; rot: number; width: number;
+  /** line spacing factor (DXF 44) */
+  ls?: number;
   /** 1..9: TL, TC, TR, ML, MC, MR, BL, BC, BR */
   attach: number; style?: string;
 }
@@ -126,33 +129,25 @@ const widthCache = new Map<string, number>();
 export const TEXT_FONT = '"Segoe UI", Arial, Helvetica, sans-serif';
 
 /** Width of a single-line string at height 1 (world units per unit height). */
-export function textUnitWidth(s: string): number {
-  const hit = widthCache.get(s);
+export function textUnitWidth(s: string, style?: { bold?: boolean; italic?: boolean }): number {
+  const key = style && (style.bold || style.italic) ? `${style.bold ? 'b' : ''}${style.italic ? 'i' : ''}|${s}` : s;
+  const hit = widthCache.get(key);
   if (hit !== undefined) return hit;
-  if (measureCtx === undefined) {
-    measureCtx = typeof document !== 'undefined' ? document.createElement('canvas').getContext('2d') : null;
-    if (measureCtx) measureCtx.font = `100px ${TEXT_FONT}`;
-  }
-  // Cap height of the UI font is ~0.7 of its em size; AutoCAD text height is the cap height.
-  const w = measureCtx ? measureCtx.measureText(s).width / 100 / 0.7 : s.length * 0.75;
+  if (measureCtx === undefined) measureCtx = typeof document !== 'undefined' ? document.createElement('canvas').getContext('2d') : null;
+  let w: number;
+  if (measureCtx) {
+    measureCtx.font = `${style?.italic ? 'italic ' : ''}${style?.bold ? 'bold ' : ''}100px ${TEXT_FONT}`;
+    // Cap height of the UI font is ~0.7 of its em size; AutoCAD text height is the cap height.
+    w = measureCtx.measureText(s).width / 100 / 0.7;
+  } else w = s.length * (style?.bold ? 0.8 : 0.75);
   if (widthCache.size > 20000) widthCache.clear();
-  widthCache.set(s, w);
+  widthCache.set(key, w);
   return w;
 }
 
-/** Strips MTEXT inline formatting codes, returning plain lines. */
+/** Plain lines of MTEXT contents (formatting removed). */
 export function mtextLines(raw: string): string[] {
-  let s = raw;
-  s = s.replace(/\\[Pp]/g, '\n');
-  s = s.replace(/\\S([^;^#\\]*)[\^#/]([^;]*);/g, '$1/$2');
-  s = s.replace(/\\[ACcFfHhQqTtWw][^;]*;/g, '');
-  s = s.replace(/\\[LlOoKkNn]/g, '');
-  s = s.replace(/\\~/g, ' ');
-  s = s.replace(/\\U\+([0-9A-Fa-f]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
-  s = s.replace(/\\([\\{}])/g, '\u0001$1');
-  s = s.replace(/[{}]/g, '');
-  s = s.replace(/\u0001(.)/g, '$1');
-  return decodeSpecialChars(s).split('\n');
+  return mtextPlain(raw).split('\n');
 }
 
 export function decodeSpecialChars(s: string): string {
@@ -167,26 +162,14 @@ export function decodeSpecialChars(s: string): string {
 
 export const MTEXT_LINE_SPACING = 5 / 3;
 
-/** Word-wraps MTEXT lines to the reference width. */
-export function mtextLayout(e: MTextEnt): string[] {
-  const lines = mtextLines(e.text);
-  if (!(e.width > 0)) return lines;
-  const out: string[] = [];
-  const maxW = e.width / e.h;
-  for (const line of lines) {
-    const words = line.split(' ');
-    let cur = '';
-    for (const w of words) {
-      const cand = cur ? cur + ' ' + w : w;
-      if (cur && textUnitWidth(cand) > maxW) {
-        out.push(cur);
-        cur = w;
-      } else cur = cand;
-    }
-    out.push(cur);
-  }
-  return out;
+const measureRun = (t: string, st: { bold: boolean; italic: boolean }) => textUnitWidth(t, st);
+
+/** Word-wrapped, styled MTEXT lines (widths in units of entity height). */
+export function mtextLayout(e: MTextEnt): MLine[] {
+  return layoutMText(e.text, e.h, e.width > 0 ? e.width / e.h : 0, measureRun);
 }
+
+export interface PlacedLine { line: MLine; x: number; y: number }
 
 /** Local frame for text: origin at the text's insertion, x along rotation. Returns box corners in local units. */
 export function textLocalBox(e: TextEnt): { x0: number; y0: number; x1: number; y1: number } {
@@ -202,17 +185,29 @@ export function textLocalBox(e: TextEnt): { x0: number; y0: number; x1: number; 
   return { x0, y0, x1: x0 + w, y1: y0 + e.h };
 }
 
-export function mtextLocalBox(e: MTextEnt): { x0: number; y0: number; x1: number; y1: number; lines: string[] } {
+export function mtextLocalBox(e: MTextEnt): { x0: number; y0: number; x1: number; y1: number; lines: PlacedLine[] } {
   const lines = mtextLayout(e);
+  const lh = e.h * MTEXT_LINE_SPACING * (e.ls ?? 1);
   let w = 0;
-  for (const l of lines) w = Math.max(w, textUnitWidth(l) * e.h);
-  const lh = e.h * MTEXT_LINE_SPACING;
-  const total = e.h + (lines.length - 1) * lh;
+  for (const l of lines) w = Math.max(w, l.width * e.h);
+  // Baselines: first line sits one (scaled) text height below the top.
+  const ys: number[] = [];
+  let y = -e.h * (lines[0]?.hf ?? 1);
+  for (let i = 0; i < lines.length; i++) {
+    if (i > 0) y -= lh * Math.max(1, lines[i].hf);
+    ys.push(y);
+  }
+  const total = -(ys[ys.length - 1] ?? -e.h);
   const col = (e.attach - 1) % 3;
   const row = Math.floor((e.attach - 1) / 3);
   const x0 = col === 0 ? 0 : col === 1 ? -w / 2 : -w;
   const yTop = row === 0 ? 0 : row === 1 ? total / 2 : total;
-  return { x0, y0: yTop - total, x1: x0 + w, y1: yTop, lines };
+  const placed = lines.map((line, i) => {
+    const lw = line.width * e.h;
+    const x = col === 0 ? x0 : col === 1 ? -lw / 2 : -lw;
+    return { line, x, y: yTop + ys[i] };
+  });
+  return { x0, y0: yTop - total, x1: x0 + w, y1: yTop, lines: placed };
 }
 
 function localBoxCorners(p: Vec, rot: number, b: { x0: number; y0: number; x1: number; y1: number }): Vec[] {
@@ -959,12 +954,22 @@ export function entExplode(e: Entity, ctx: DocCtx): NewEntity[] | null {
       return out;
     }
     case 'mtext': {
-      const lb = mtextLocalBox(e);
-      const lh = e.h * MTEXT_LINE_SPACING;
-      return lb.lines.map((s, i) => {
-        const local = { x: lb.x0, y: lb.y1 - e.h - i * lh };
-        return { type: 'text', p: add(e.p, rotate(local, { x: 0, y: 0 }, e.rot)), h: e.h, text: s, rot: e.rot, halign: 0, valign: 0, wf: 1, ...p } as NewEntity;
-      });
+      // One TEXT per styled run, keeping run colors and heights.
+      const out: NewEntity[] = [];
+      for (const pl of mtextLocalBox(e).lines) {
+        let x = pl.x;
+        for (const r of pl.line.runs) {
+          const h = e.h * r.hf;
+          const local = { x, y: pl.y };
+          x += textUnitWidth(r.text, r) * h;
+          if (!r.text.trim()) continue;
+          out.push({
+            type: 'text', p: add(e.p, rotate(local, { x: 0, y: 0 }, e.rot)), h, text: r.text, rot: e.rot, halign: 0, valign: 0, wf: 1,
+            ...p, ...(r.color !== undefined ? { color: r.color, trueColor: undefined } : {}),
+          } as NewEntity);
+        }
+      }
+      return out;
     }
     case 'hatch': return e.loops.map((l) => ({ type: 'polyline', pts: l.pts, bulges: l.bulges, closed: true, ...p }) as NewEntity);
     default: return null;

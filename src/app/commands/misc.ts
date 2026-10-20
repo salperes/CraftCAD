@@ -313,6 +313,8 @@ export async function OSNAP(ed: Editor): Promise<void> {
   ed.ui.onStatus();
 }
 
+export async function ABOUT(ed: Editor): Promise<void> { ed.ui.about(); }
+
 export async function HELP(ed: Editor): Promise<void> {
   const groups: Record<string, string[]> = {};
   for (const c of ed.commands.values()) {

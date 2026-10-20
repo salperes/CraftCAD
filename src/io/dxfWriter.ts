@@ -409,6 +409,7 @@ function writeEntity(ctx: WriteCtx, e: Entity, owner: string): void {
       o.tag(1, rest);
       o.tag(7, 'Standard');
       o.pt(11, { x: Math.cos(e.rot), y: Math.sin(e.rot) });
+      if (e.ls && e.ls !== 1) { o.int(73, 1); o.tag(44, e.ls); }
       return;
     }
     case 'solid': {
