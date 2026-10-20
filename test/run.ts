@@ -117,6 +117,15 @@ console.log('\nundo / redo');
   ok(!doc.layers.has('X'), 'layer creation is undoable');
 }
 
+console.log('\nDXF reader');
+{
+  // MTEXT with an embedded object: its 11/21 must not be read as the text direction.
+  const dxf = ['0', 'SECTION', '2', 'ENTITIES', '0', 'MTEXT', '8', '0', '100', 'AcDbMText', '10', '5', '20', '6', '40', '2.5', '41', '100', '71', '1',
+    '1', 'Date:', '73', '1', '101', 'Embedded Object', '70', '1', '10', '1.0', '20', '0.0', '11', '-1686.5', '21', '277.7', '0', 'ENDSEC', '0', 'EOF'].join('\n');
+  const mt = readDxf(dxf).entities[0] as { type: string; rot: number; p: G.Vec; width: number };
+  ok(mt?.type === 'mtext' && near(mt.rot, 0) && near(mt.p.x, 5) && near(mt.width, 100), 'MTEXT embedded object ignored (rotation 0)');
+}
+
 function stats(doc: Drawing): Record<string, number> {
   const s: Record<string, number> = {};
   for (const e of doc.entities.values()) s[e.type] = (s[e.type] ?? 0) + 1;

@@ -194,6 +194,10 @@ export function readDxf(input: Uint8Array | string): DxfData {
     let rec = nextRec();
     while (rec && !endTypes.includes(rec.type)) {
       if (rec.type === '') { rec = nextRec(); continue; }
+      // MTEXT from newer AutoCAD versions ends with an embedded object (code 101) that
+      // repeats codes 10/11/40… with other meanings; only the part before it is the entity.
+      const emb = rec.tags.findIndex(([c]) => c === 101);
+      if (emb >= 0) rec.tags.length = emb;
       const rv = new RecView(rec);
       if (rec.type === 'POLYLINE') {
         const verts: RecView[] = [];
