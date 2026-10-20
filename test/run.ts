@@ -204,5 +204,40 @@ for (const f of files) {
   ok(back.layers.has('Ölçü'), 'Turkish layer name survives');
 }
 
+console.log('\nlayouts round trip');
+{
+  const doc = new Drawing();
+  doc.add({ type: 'circle', c: { x: 500, y: 300 }, r: 200 });
+  doc.commit();
+  const [l1, l2] = doc.layouts;
+  l1.name = 'Plan A3';
+  doc.activate(l1, 'paper');
+  doc.add({ type: 'viewport', c: { x: 150, y: 140 }, w: 260, h: 240, vc: { x: 500, y: 300 }, vh: 480, locked: true });
+  doc.add({ type: 'text', p: { x: 10, y: 10 }, h: 5, text: 'Başlık', rot: 0, halign: 0, valign: 0, wf: 1 });
+  doc.commit();
+  doc.activate(l2, 'paper');
+  l2.paper = { name: 'ISO A1 (841.00 x 594.00 MM)', w: 841, h: 594, margins: [5, 5, 5, 5] };
+  doc.add({ type: 'line', p1: { x: 0, y: 0 }, p2: { x: 100, y: 0 } });
+  doc.add({ type: 'viewport', c: { x: 400, y: 300 }, w: 400, h: 300, vc: { x: 500, y: 300 }, vh: 600, off: true });
+  doc.commit();
+  doc.activate(l1, 'paper');
+  ok(doc.modelEntities.size === 1 && doc.entities.size === 2, 'spaces keep their own entities');
+  const out = writeDxf(doc);
+  writeFileSync(join(outDir, 'layouts.dxf'), out);
+  const data = readDxf(out);
+  ok(data.paperActive, '$TILEMODE 0 when a layout is active');
+  const back = new Drawing();
+  const r = loadDxfData(back, data, 'lay');
+  ok(back.layouts.map((l) => l.name).join('|') === 'Plan A3|Layout2', `layout names/order (${back.layouts.map((l) => l.name).join('|')})`);
+  ok(r.activeLayout === 'Plan A3', 'active layout restored');
+  ok(back.entities.size === 1, 'model space has 1 entity');
+  const p1 = [...back.paperEntities(back.layouts[0]).values()];
+  const vp = p1.find((e) => e.type === 'viewport');
+  ok(p1.length === 2 && vp?.type === 'viewport' && near(vp.vh, 480) && near(vp.vc.x, 500) && near(vp.w, 260) && !!vp.locked, 'layout 1: viewport + text');
+  const p2 = [...back.paperEntities(back.layouts[1]).values()];
+  ok(p2.length === 2 && p2.some((e) => e.type === 'viewport' && e.off), 'layout 2 (block *Paper_Space0): line + off viewport');
+  ok(near(back.layouts[1].paper.w, 841) && near(back.layouts[1].paper.h, 594), 'paper size survives');
+}
+
 console.log(failed ? `\n${failed} FAILED` : '\nall passed');
 process.exit(failed ? 1 : 0);

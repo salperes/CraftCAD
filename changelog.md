@@ -1,4 +1,22 @@
 ---------------------------------------------------------
+Rev. ID    : 13
+Version    : 0.5.0
+Rev. Date  : 20.10.2026
+Rev. Time  : 07:40:26
+Rev. Prompt: Layout özelliği de ekle
+
+Rev. Report: (
+- Client: Model / Layout sekmeleri — geçiş, çift tıkla yeniden adlandırma, sağ tık menüsü (New, Delete, Rename, Move, Copy, Page Setup, Plot), + ile yeni layout
+- Client: Layout görünümü — gri zemin üzerinde beyaz kağıt, yazdırma sınırı; paper space'te bütün çizim ve düzenleme komutları
+- Client: Viewport nesnesi — model space'i ölçekli ve kırpılmış gösterir (WebGL scissor ile), grip ile boyutlandırma, STRETCH, özellikler paleti (ölçek, kilit, açık/kapalı)
+- Client: MSPACE/PSPACE — viewport içine/dışına çift tıklama, durum çubuğunda MODEL/PAPER düğmesi, aktif viewport mavi çerçeve, kilitli viewport'ta zoom kağıda uygulanır
+- Client: Komutlar LAYOUT (LO), MVIEW (MV: köşe, Fit, 2, 4, ON/OFF, Lock), MSPACE (MS), PSPACE (PS), PAGESETUP; ZOOM nXP; TILEMODE ve CTAB sistem değişkenleri
+- Client: Durum çubuğunda viewport ölçeği seçici (1:1 … 1:5000, 2:1 …); "Layout" bağlamsal şerit sekmesi; Page Setup penceresi (kağıt boyutu, yön, kenar boşlukları)
+- Client: PLOT layout'ta sayfayı 1:1 basıyor; ilk açılan boş layout'a model çizimini gösteren viewport otomatik ekleniyor
+- Client: DXF/DWG — LAYOUT nesneleri, paper space nesneleri (*Paper_Space bloklar) ve VIEWPORT okuma/yazma; $TILEMODE ile son açık layout'ta açılma
+- Test: Layout gidiş-dönüş birim testleri; AutoCAD Core Console ve ODA DWG 2018 doğrulaması; test/layout.mjs (Playwright)
+)
+---------------------------------------------------------
 Rev. ID    : 12
 Version    : 0.4.2
 Rev. Date  : 20.10.2026

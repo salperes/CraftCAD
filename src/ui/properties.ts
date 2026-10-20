@@ -1,7 +1,8 @@
 // Properties palette: general properties for the selection, geometry for single objects.
 
 import type { Editor } from '../app/editor.ts';
-import { type Entity, ENT_NAMES, BYLAYER, polyArea, polylineSegPrims, dimText, dimMeasurement } from '../core/entities.ts';
+import { type Entity, ENT_NAMES, BYLAYER, polyArea, polylineSegPrims, dimText, dimMeasurement, vpResize, vpScale } from '../core/entities.ts';
+import { VP_SCALES, scaleLabel } from '../app/commands/layout.ts';
 import { colorName, aciToCss } from '../core/aci.ts';
 import { dist, angleBetween, normAng, deg, rad, fmtNum, sweep, TAU } from '../core/geom.ts';
 import { PATTERN_NAMES } from '../core/patterns.ts';
@@ -185,6 +186,20 @@ export class PropertiesPalette {
       case 'solid':
         ro('Vertices', String(e.pts.length));
         break;
+      case 'viewport': {
+        num('Center X', e.c.x, (v) => ({ ...e, c: { ...e.c, x: v } })); num('Center Y', e.c.y, (v) => ({ ...e, c: { ...e.c, y: v } }));
+        num('Width', e.w, (v) => vpResize(e, { x: e.c.x - e.w / 2, y: e.c.y - e.h / 2 }, { x: e.c.x - e.w / 2 + Math.max(v, 1e-6), y: e.c.y + e.h / 2 }));
+        num('Height', e.h, (v) => vpResize(e, { x: e.c.x - e.w / 2, y: e.c.y - e.h / 2 }, { x: e.c.x + e.w / 2, y: e.c.y - e.h / 2 + Math.max(v, 1e-6) }));
+        F.push({ label: 'On', options: ['Yes', 'No'], current: e.off ? 'No' : 'Yes', choose: (v) => ({ ...e, off: v === 'No' || undefined }) });
+        F.push({ label: 'Display locked', options: ['Yes', 'No'], current: e.locked ? 'Yes' : 'No', choose: (v) => ({ ...e, locked: v === 'Yes' || undefined }) });
+        const k = vpScale(e);
+        const label = scaleLabel(k);
+        const names = VP_SCALES.map(([n]) => n);
+        F.push({ label: 'Standard scale', options: names.includes(label) ? names : ['Custom', ...names], current: names.includes(label) ? label : 'Custom', choose: (v) => ({ ...e, vh: e.h / (VP_SCALES.find(([n]) => n === v)?.[1] ?? k) }) });
+        num('Custom scale', k, (v) => ({ ...e, vh: e.h / Math.max(v, 1e-12) }));
+        num('View center X', e.vc.x, (v) => ({ ...e, vc: { ...e.vc, x: v } })); num('View center Y', e.vc.y, (v) => ({ ...e, vc: { ...e.vc, y: v } }));
+        break;
+      }
     }
     return F.map((f) => {
       if ('ro' in f) return this.row(f.label, h('span', { class: 'pv ro' }, f.value));

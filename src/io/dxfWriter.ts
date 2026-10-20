@@ -4,10 +4,10 @@
 import type { Vec } from '../core/geom.ts';
 import { deg, normAng, sub, dist } from '../core/geom.ts';
 import {
-  type Entity, type DimEnt, type TextEnt, type HatchEnt, type NewEntity,
+  type Entity, type DimEnt, type TextEnt, type HatchEnt, type NewEntity, type ViewportEnt,
   BYLAYER, dimGeometry, dimMeasurement, arrowPts, isFullEllipse,
 } from '../core/entities.ts';
-import type { Drawing, Linetype } from '../core/document.ts';
+import type { Drawing, Linetype, Layout } from '../core/document.ts';
 import { patternLines } from '../core/patterns.ts';
 
 class Out {
@@ -76,7 +76,17 @@ export function writeDxf(doc: Drawing): string {
     brTable: o.nextHandle(), rootDict: o.nextHandle(), groupDict: o.nextHandle(),
     plotStyleDict: o.nextHandle(), plotStyleNormal: o.nextHandle(),
     modelBR: o.nextHandle(), paperBR: o.nextHandle(), standardStyle: o.nextHandle(), standardDimstyle: o.nextHandle(),
+    layoutDict: o.nextHandle(), modelLayout: o.nextHandle(),
   };
+  // Layouts: the active one (or the first) owns *Paper_Space and goes in ENTITIES, the
+  // others are *Paper_Space0, *Paper_Space1… blocks.
+  const model = doc.modelEntities;
+  const current = doc.layout ?? doc.layouts[0];
+  let pn = 0;
+  const layouts: LayoutRec[] = doc.layouts.map((l) => {
+    const active = l === current;
+    return { l, active, br: active ? H.paperBR : o.nextHandle(), handle: o.nextHandle(), block: active ? '*Paper_Space' : `*Paper_Space${pn++}`, ents: [...doc.paperEntities(l).values()] };
+  });
 
   // Collect blocks: user/imported blocks plus generated dimension blocks.
   const blocks: BlockRec[] = [];
@@ -96,14 +106,15 @@ export function writeDxf(doc: Drawing): string {
     blocks.push({ name, handle: o.nextHandle(), base: { x: 0, y: 0 }, entities: ents, flags: 1 });
     dimBlocks.set(e.id, name);
   };
-  for (const e of doc.entities.values()) if (e.type === 'dimension') genDimBlock(e);
+  for (const e of model.values()) if (e.type === 'dimension') genDimBlock(e);
+  for (const L of layouts) for (const e of L.ents) if (e.type === 'dimension') genDimBlock(e);
   for (const b of blocks.slice()) for (const e of b.entities) if (e.type === 'dimension' && !dimBlocks.has(e.id)) genDimBlock(e);
 
   // Linetypes actually referenced plus the standard set.
   const ltypes = new Map<string, Linetype>();
   for (const lt of doc.linetypes.values()) ltypes.set(lt.name.toUpperCase(), lt);
 
-  const ext = doc.extents();
+  const ext = doc.extents(model);
   const hasExt = ext.minX <= ext.maxX;
 
   // ---------------------------------------------------------------- HEADER
@@ -146,6 +157,7 @@ export function writeDxf(doc: Drawing): string {
   hv('$MEASUREMENT', () => o.int(70, 1));
   hv('$LUNITS', () => o.int(70, 2));
   hv('$LUPREC', () => o.int(70, 4));
+  hv('$TILEMODE', () => o.int(70, doc.layout ? 0 : 1));
   hv('$HANDSEED', () => o.tag(5, 'FFFFF'));
   o.tag(0, 'ENDSEC');
 
@@ -231,20 +243,22 @@ export function writeDxf(doc: Drawing): string {
     o.tag(340, H.standardStyle);
   }, 'AcDbDimStyleTable');
 
-  table('BLOCK_RECORD', H.brTable, blocks.length + 2, () => {
-    const br = (name: string, handle: string) => {
+  if (!layouts.some((L) => L.active)) layouts.unshift({ l: null, active: true, br: H.paperBR, handle: '', block: '*Paper_Space', ents: [] });
+  table('BLOCK_RECORD', H.brTable, blocks.length + 1 + layouts.length, () => {
+    const br = (name: string, handle: string, layout?: string) => {
       o.tag(0, 'BLOCK_RECORD'); o.tag(5, handle); o.tag(330, H.brTable);
       o.tag(100, 'AcDbSymbolTableRecord'); o.tag(100, 'AcDbBlockTableRecord');
       o.str(2, name);
+      if (layout) o.tag(340, layout);
     };
-    br('*Model_Space', H.modelBR);
-    br('*Paper_Space', H.paperBR);
+    br('*Model_Space', H.modelBR, H.modelLayout);
+    for (const L of layouts) br(L.block, L.br, L.handle || undefined);
     for (const b of blocks) br(b.name, b.handle);
   });
   o.tag(0, 'ENDSEC');
 
   // ---------------------------------------------------------------- BLOCKS
-  const ctx: WriteCtx = { o, doc, ltypes, dimBlocks };
+  const ctx: WriteCtx = { o, doc, ltypes, dimBlocks, vpId: 1 };
   o.tag(0, 'SECTION'); o.tag(2, 'BLOCKS');
   const blockHead = (name: string, owner: string, base: Vec, flags: number, paper = false) => {
     o.tag(0, 'BLOCK'); o.tag(5, o.nextHandle()); o.tag(330, owner); o.tag(100, 'AcDbEntity');
@@ -257,7 +271,11 @@ export function writeDxf(doc: Drawing): string {
     o.tag(8, '0'); o.tag(100, 'AcDbBlockEnd');
   };
   blockHead('*Model_Space', H.modelBR, { x: 0, y: 0 }, 0); blockTail(H.modelBR);
-  blockHead('*Paper_Space', H.paperBR, { x: 0, y: 0 }, 0, true); blockTail(H.paperBR, true);
+  for (const L of layouts) {
+    blockHead(L.block, L.br, { x: 0, y: 0 }, 0, true);
+    if (!L.active) writePaper(ctx, L);
+    blockTail(L.br, true);
+  }
   for (const b of blocks) {
     blockHead(b.name, b.handle, b.base, b.flags);
     for (const e of b.entities) writeEntity(ctx, e, b.handle);
@@ -267,19 +285,28 @@ export function writeDxf(doc: Drawing): string {
 
   // ---------------------------------------------------------------- ENTITIES
   o.tag(0, 'SECTION'); o.tag(2, 'ENTITIES');
-  for (const e of doc.entities.values()) writeEntity(ctx, e, H.modelBR);
+  for (const e of model.values()) writeEntity(ctx, e, H.modelBR);
+  const cur = layouts.find((L) => L.active);
+  if (cur) writePaper(ctx, cur);
   o.tag(0, 'ENDSEC');
 
   // ---------------------------------------------------------------- OBJECTS
   o.tag(0, 'SECTION'); o.tag(2, 'OBJECTS');
   o.tag(0, 'DICTIONARY'); o.tag(5, H.rootDict); o.tag(330, '0'); o.tag(100, 'AcDbDictionary'); o.int(281, 1);
   o.tag(3, 'ACAD_GROUP'); o.tag(350, H.groupDict);
+  o.tag(3, 'ACAD_LAYOUT'); o.tag(350, H.layoutDict);
   o.tag(3, 'ACAD_PLOTSTYLENAME'); o.tag(350, H.plotStyleDict);
   o.tag(0, 'DICTIONARY'); o.tag(5, H.groupDict); o.tag(330, H.rootDict); o.tag(100, 'AcDbDictionary'); o.int(281, 1);
   o.tag(0, 'ACDBDICTIONARYWDFLT'); o.tag(5, H.plotStyleDict); o.tag(330, H.rootDict); o.tag(100, 'AcDbDictionary'); o.int(281, 1);
   o.tag(3, 'Normal'); o.tag(350, H.plotStyleNormal);
   o.tag(100, 'AcDbDictionaryWithDefault'); o.tag(340, H.plotStyleNormal);
   o.tag(0, 'ACDBPLACEHOLDER'); o.tag(5, H.plotStyleNormal); o.tag(330, H.plotStyleDict);
+  const real = layouts.filter((L) => L.l);
+  o.tag(0, 'DICTIONARY'); o.tag(5, H.layoutDict); o.tag(330, H.rootDict); o.tag(100, 'AcDbDictionary'); o.int(281, 1);
+  o.tag(3, 'Model'); o.tag(350, H.modelLayout);
+  for (const L of real) { o.str(3, cleanName(L.l!.name)); o.tag(350, L.handle); }
+  writeLayoutObject(o, H.modelLayout, H.layoutDict, H.modelBR, null, 0);
+  real.forEach((L, i) => writeLayoutObject(o, L.handle, H.layoutDict, L.br, L.l, i + 1));
   o.tag(0, 'ENDSEC');
   o.tag(0, 'EOF');
 
@@ -287,7 +314,84 @@ export function writeDxf(doc: Drawing): string {
   return o.toString().replace('\r\n  5\r\nFFFFF\r\n', `\r\n  5\r\n${o.handseed}\r\n`);
 }
 
+interface LayoutRec { l: Layout | null; active: boolean; br: string; handle: string; block: string; ents: Entity[] }
+
+/** Paper space of one layout: the sheet's own viewport (id 1), then its entities. */
+function writePaper(ctx: WriteCtx, L: LayoutRec): void {
+  if (!L.l) return;
+  ctx.paper = true;
+  ctx.vpId = 1;
+  const p = L.l.paper, [ml, mb] = p.margins;
+  const c = { x: p.w / 2 - ml, y: p.h / 2 - mb };
+  writeViewport(ctx, { id: 0, type: 'viewport', layer: '0', color: BYLAYER, ltype: 'ByLayer', c, w: p.w * 1.2, h: p.h * 1.2, vc: c, vh: p.h * 1.2 }, L.br);
+  for (const e of L.ents) writeEntity(ctx, e, L.br);
+  ctx.paper = false;
+}
+
+function writeViewport(ctx: WriteCtx, e: ViewportEnt, owner: string): void {
+  const { o } = ctx;
+  const id = ctx.vpId++;
+  entHead(ctx, 'VIEWPORT', e, owner);
+  o.tag(100, 'AcDbViewport');
+  o.pt(10, e.c); o.tag(40, e.w); o.tag(41, e.h);
+  o.int(68, e.off ? 0 : id); o.int(69, id);
+  o.tag(12, e.vc.x); o.tag(22, e.vc.y);
+  o.tag(13, 0); o.tag(23, 0); o.tag(14, 10); o.tag(24, 10); o.tag(15, 10); o.tag(25, 10);
+  o.tag(16, 0); o.tag(26, 0); o.tag(36, 1); o.tag(17, 0); o.tag(27, 0); o.tag(37, 0);
+  o.tag(42, 50); o.tag(43, 0); o.tag(44, 0); o.tag(45, e.vh); o.tag(50, 0); o.tag(51, 0);
+  o.int(72, 1000);
+  o.int(90, 32768 | 32 | (e.locked ? 16384 : 0) | (e.off ? 131072 : 0));
+  o.tag(1, ''); o.int(281, 0); o.int(71, 1); o.int(74, 0);
+  o.pt(110, { x: 0, y: 0 }); o.pt(111, { x: 1, y: 0 }); o.pt(112, { x: 0, y: 1 });
+  o.int(79, 0); o.tag(146, 0);
+}
+
+/** LAYOUT object (plot settings + layout data); Model when l is null. */
+function writeLayoutObject(o: Out, handle: string, owner: string, br: string, l: Layout | null, order: number): void {
+  const pl = l?.plot ?? {};
+  const n = (c: number, d: number) => (pl[c] !== undefined && Number.isFinite(+pl[c]) ? +pl[c] : d);
+  const str = (c: number, d: string) => (pl[c] !== undefined ? String(pl[c]) : d);
+  o.tag(0, 'LAYOUT'); o.tag(5, handle); o.tag(330, owner);
+  o.tag(100, 'AcDbPlotSettings');
+  o.tag(1, '');
+  if (!l) {
+    o.tag(2, 'none_device'); o.tag(4, ''); o.tag(6, '');
+    for (const c of [40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 140, 141]) o.tag(c, 0);
+    o.tag(142, 1); o.tag(143, 1); o.int(70, 1712); o.int(72, 0); o.int(73, 0); o.int(74, 0); o.tag(7, ''); o.int(75, 0);
+    o.tag(147, 1); o.tag(148, 0); o.tag(149, 0);
+  } else {
+    // Plot settings read from the file are kept while the sheet is unchanged.
+    const p = l.paper, [ml, mb, mr, mt] = p.margins;
+    const keep = l.plot !== undefined;
+    o.str(2, keep ? str(2, 'none_device') : 'none_device');
+    o.str(4, keep ? str(4, '') : p.name.replace(/ /g, '_'));
+    o.tag(6, '');
+    if (keep) for (const c of [40, 41, 42, 43, 44, 45]) o.tag(c, n(c, 0));
+    else { o.tag(40, ml); o.tag(41, mb); o.tag(42, mr); o.tag(43, mt); o.tag(44, p.w); o.tag(45, p.h); }
+    for (const c of [46, 47, 48, 49, 140, 141]) o.tag(c, 0);
+    o.tag(142, keep ? n(142, 1) : 1); o.tag(143, keep ? n(143, 1) : 1);
+    o.int(70, keep ? n(70, 672) : 672); o.int(72, 1); o.int(73, keep ? n(73, 0) : 0); o.int(74, 5);
+    o.str(7, keep ? str(7, '') : ''); o.int(75, keep ? n(75, 16) : 16);
+    o.tag(147, keep ? n(147, 1) : 1); o.tag(148, 0); o.tag(149, 0);
+  }
+  o.tag(100, 'AcDbLayout');
+  o.str(1, l ? cleanName(l.name) : 'Model');
+  o.int(70, 1); o.int(71, order);
+  if (l) {
+    const p = l.paper, [ml, mb] = p.margins;
+    o.tag(10, -ml); o.tag(20, -mb); o.tag(11, p.w - ml); o.tag(21, p.h - mb);
+  } else { o.tag(10, 0); o.tag(20, 0); o.tag(11, 420); o.tag(21, 297); }
+  o.pt(12, { x: 0, y: 0 }); o.pt(14, { x: 0, y: 0 }); o.pt(15, { x: 0, y: 0 });
+  o.tag(146, 0); o.pt(13, { x: 0, y: 0 }); o.pt(16, { x: 1, y: 0 }); o.pt(17, { x: 0, y: 1 });
+  o.int(76, 0);
+  o.tag(330, br);
+}
+
 interface WriteCtx {
+  /** Writing paper space entities (67 = 1). */
+  paper?: boolean;
+  /** Next VIEWPORT id within the layout being written. */
+  vpId: number;
   o: Out;
   doc: Drawing;
   ltypes: Map<string, Linetype>;
@@ -298,6 +402,7 @@ function entHead(ctx: WriteCtx, type: string, e: Pick<Entity, 'layer' | 'color' 
   const { o } = ctx;
   const h = o.nextHandle();
   o.tag(0, type); o.tag(5, h); o.tag(330, owner); o.tag(100, 'AcDbEntity');
+  if (ctx.paper) o.int(67, 1);
   o.str(8, cleanName(e.layer || '0'));
   const lt = e.ltype || 'ByLayer';
   if (!/^bylayer$/i.test(lt)) {
@@ -421,6 +526,9 @@ function writeEntity(ctx: WriteCtx, e: Entity, owner: string): void {
     }
     case 'hatch':
       writeHatch(ctx, e, owner);
+      return;
+    case 'viewport':
+      if (ctx.paper) writeViewport(ctx, e, owner);
       return;
     case 'dimension':
       writeDimension(ctx, e, owner);

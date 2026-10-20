@@ -11,7 +11,7 @@ import { icon } from './icons.ts';
 import { h } from './dom.ts';
 import { escapeHtml, layerToggleHtml } from './ribbon.ts';
 
-function modal(title: string, cls = ''): { root: HTMLElement; body: HTMLElement; footer: HTMLElement; close: () => void } {
+export function modal(title: string, cls = ''): { root: HTMLElement; body: HTMLElement; footer: HTMLElement; close: () => void } {
   const back = h('div', { class: 'modal-back' });
   const win = h('div', { class: `modal ${cls}` });
   const head = h('div', { class: 'modal-head' }, h('span', {}, title));
@@ -37,7 +37,7 @@ function modal(title: string, cls = ''): { root: HTMLElement; body: HTMLElement;
   return { root: back, body, footer, close };
 }
 
-function button(label: string, primary = false): HTMLButtonElement {
+export function button(label: string, primary = false): HTMLButtonElement {
   return h('button', { class: 'btn' + (primary ? ' primary' : '') }, label);
 }
 

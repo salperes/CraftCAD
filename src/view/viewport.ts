@@ -2,6 +2,7 @@
 
 import type { Vec, Box } from '../core/geom.ts';
 import { boxValid } from '../core/geom.ts';
+import { type ViewportEnt, vpScale } from '../core/entities.ts';
 
 export class Viewport {
   /** World point at the center of the canvas. */
@@ -71,4 +72,16 @@ export class Viewport {
     const s = Math.min(this.w / bw, this.h / bh) * (1 - marginFrac * 2);
     this.scale = Number.isFinite(s) && s > 0 ? s : 1;
   }
+}
+
+/** Model space view seen through a layout viewport, on the same canvas as the paper view. */
+export function vpModelView(pv: Viewport, vp: ViewportEnt): Viewport {
+  const mv = new Viewport();
+  mv.resize(pv.w, pv.h);
+  const sc = pv.scale * vpScale(vp);
+  const S = pv.toScreen(vp.c);
+  mv.scale = sc;
+  mv.cx = vp.vc.x - (S.x - pv.w / 2) / sc;
+  mv.cy = vp.vc.y + (S.y - pv.h / 2) / sc;
+  return mv;
 }

@@ -79,6 +79,42 @@ export interface SpaceState {
   redo: unknown[];
 }
 
+/** Sheet size and printable area of a layout, in paper units (mm), as shown on screen. */
+export interface PaperSetup {
+  name: string;
+  w: number;
+  h: number;
+  /** Non-printable margins left, bottom, right, top; the printable area's lower left is the paper space origin. */
+  margins: [number, number, number, number];
+}
+
+export interface Layout {
+  name: string;
+  paper: PaperSetup;
+  /** Paper space entities while the layout is not the live space. */
+  store?: SpaceState;
+  /** Last paper view of the layout. */
+  view?: { cx: number; cy: number; scale: number };
+  /** False until first shown; a new empty layout then gets a default viewport. */
+  initialized: boolean;
+  /** Plot settings read from a file, written back unchanged. */
+  plot?: Record<string, number | string>;
+}
+
+export const PAPER_SIZES: { name: string; w: number; h: number }[] = [
+  { name: 'ISO A4 (297.00 x 210.00 MM)', w: 297, h: 210 },
+  { name: 'ISO A3 (420.00 x 297.00 MM)', w: 420, h: 297 },
+  { name: 'ISO A2 (594.00 x 420.00 MM)', w: 594, h: 420 },
+  { name: 'ISO A1 (841.00 x 594.00 MM)', w: 841, h: 594 },
+  { name: 'ISO A0 (1189.00 x 841.00 MM)', w: 1189, h: 841 },
+  { name: 'ANSI A (11.00 x 8.50 Inches)', w: 279.4, h: 215.9 },
+  { name: 'ANSI B (17.00 x 11.00 Inches)', w: 431.8, h: 279.4 },
+];
+
+export const defaultPaper = (): PaperSetup => ({ name: PAPER_SIZES[1].name, w: 420, h: 297, margins: [7.5, 7.5, 7.5, 7.5] });
+
+export const MODEL = 'Model';
+
 export type DocListener =(kind: 'entities' | 'layers' | 'all') => void;
 
 const cloneLayers = (m: Map<string, Layer>) => new Map([...m].map(([k, l]) => [k, { ...l }]));
@@ -95,6 +131,17 @@ export class Drawing implements DocCtx {
   currentLtype = 'ByLayer';
   fileName = 'Drawing1.dwg';
   modified = false;
+  /** Layout tabs in order (model space is always first and not listed). */
+  layouts: Layout[] = [];
+  /** Active tab: null = Model. */
+  layout: Layout | null = null;
+  /**
+   * Which entity space is live in `entities`: model space (Model tab, or a layout viewport
+   * activated with MSPACE) or the active layout's paper space.
+   */
+  live: 'model' | 'paper' = 'model';
+  /** Model space entities while paper space is live. */
+  private modelStore: SpaceState | null = null;
 
   private nextId = 1;
   private txn: Txn | null = null;
@@ -102,6 +149,8 @@ export class Drawing implements DocCtx {
   private redoStack: Txn[] = [];
   private listeners: DocListener[] = [];
   private boxCache = new Map<number, Box>();
+  /** Entity object each cached box was computed for (boxes are shared across spaces). */
+  private boxOwner = new Map<number, Entity>();
 
   constructor() {
     this.reset();
@@ -134,6 +183,85 @@ export class Drawing implements DocCtx {
     this.redoStack = [];
     this.txn = null;
     this.modified = false;
+    this.layouts = ['Layout1', 'Layout2'].map((name) => ({ name, paper: defaultPaper(), initialized: false, store: { entities: new Map(), undo: [], redo: [] } }));
+    this.layout = null;
+    this.live = 'model';
+    this.modelStore = null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Model space and layouts
+
+  /** Model space entities, whichever space is live. */
+  get modelEntities(): Map<number, Entity> {
+    return this.live === 'model' ? this.entities : this.modelStore!.entities;
+  }
+
+  /** Paper space entities of a layout, whichever space is live. */
+  paperEntities(l: Layout): Map<number, Entity> {
+    return l === this.layout && this.live === 'paper' ? this.entities : l.store!.entities;
+  }
+
+  /** True when the given entity map belongs to paper space (live or stored). */
+  get inPaper(): boolean {
+    return this.live === 'paper';
+  }
+
+  /**
+   * Switches the active tab and the live space. Each space keeps its own undo history,
+   * like the block editor does.
+   */
+  activate(layout: Layout | null, live: 'model' | 'paper'): void {
+    if (!layout) live = 'model';
+    const cur: Layout | 'model' = this.live === 'model' ? 'model' : this.layout!;
+    const next: Layout | 'model' = live === 'model' ? 'model' : layout!;
+    if (cur !== next) {
+      const target = next === 'model' ? this.modelStore! : next.store!;
+      const prev = this.swapSpace(target);
+      if (cur === 'model') this.modelStore = prev; else cur.store = prev;
+      if (next === 'model') this.modelStore = null; else next.store = undefined;
+    }
+    this.layout = layout;
+    this.live = live;
+    this.emit('all');
+  }
+
+  layoutByName(name: string): Layout | undefined {
+    const n = name.toUpperCase();
+    return this.layouts.find((l) => l.name.toUpperCase() === n);
+  }
+
+  addLayout(name: string, paper = defaultPaper()): Layout {
+    const l: Layout = { name, paper, initialized: false, store: { entities: new Map(), undo: [], redo: [] } };
+    this.layouts.push(l);
+    this.modified = true;
+    return l;
+  }
+
+  /** Removes a layout that is not active. */
+  deleteLayout(l: Layout): void {
+    if (l === this.layout) throw new Error('Cannot delete the current layout');
+    this.layouts = this.layouts.filter((x) => x !== l);
+    this.modified = true;
+  }
+
+  uniqueLayoutName(prefix = 'Layout'): string {
+    for (let i = 1; ; i++) if (!this.layoutByName(prefix + i)) return prefix + i;
+  }
+
+  /** Adds an entity to a stored (not live) space without undo, e.g. while loading a file. */
+  loadInto(target: Map<number, Entity>, ne: NewEntity): Entity {
+    const e = { layer: '0', color: BYLAYER, ltype: 'ByLayer', ...ne, id: this.allocId() } as Entity;
+    if (!this.layers.has(e.layer)) this.addLayerQuiet(e.layer);
+    target.set(e.id, e);
+    return e;
+  }
+
+  /** Replaces an entity in a stored space without undo (viewport view changes). */
+  setStored(target: Map<number, Entity>, e: Entity): void {
+    if (target === this.entities) this.boxCache.delete(e.id);
+    target.set(e.id, e);
+    this.modified = true;
   }
 
   on(fn: DocListener): void {
@@ -340,9 +468,10 @@ export class Drawing implements DocCtx {
 
   box(e: Entity): Box {
     let b = this.boxCache.get(e.id);
-    if (!b || this.entities.get(e.id) !== e) {
+    if (!b || this.boxOwner.get(e.id) !== e) {
       b = entBox(e, this);
       this.boxCache.set(e.id, b);
+      this.boxOwner.set(e.id, e);
     }
     return b;
   }
@@ -352,9 +481,9 @@ export class Drawing implements DocCtx {
     for (const b of this.blocks.values()) b.box = undefined;
   }
 
-  extents(): Box {
+  extents(ents: Map<number, Entity> = this.entities): Box {
     let b = emptyBox();
-    for (const e of this.entities.values()) {
+    for (const e of ents.values()) {
       const l = this.layers.get(e.layer);
       if (l && (!l.on || l.frozen)) continue;
       const eb = this.box(e);

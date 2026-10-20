@@ -15,6 +15,10 @@ $scr = Join-Path $work 'check.scr'
   '(setq tl nil i 0)',
   '(if ss (repeat (sslength ss) (setq tp (cdr (assoc 0 (entget (ssname ss i))))) (setq tl (if (assoc tp tl) (subst (cons tp (1+ (cdr (assoc tp tl)))) (assoc tp tl) tl) (cons (cons tp 1) tl))) (setq i (1+ i))))',
   '(write-line (vl-prin1-to-string tl) f)',
+  '(vl-load-com)',
+  '(setq i 0)',
+  '(if ss (repeat (sslength ss) (setq ed (entget (ssname ss i))) (if (= (cdr (assoc 0 ed)) "VIEWPORT") (write-line (vl-prin1-to-string (mapcar (function (lambda (c) (cdr (assoc c ed)))) (list 410 69 10 40 41 12 45 90))) f)) (setq i (1+ i))))',
+  '(write-line (strcat "LAYOUTS=" (vl-prin1-to-string (mapcar (function cdr) (vl-remove-if-not (function (lambda (x) (= (car x) 3))) (dictsearch (namedobjdict) "ACAD_LAYOUT"))))) f)',
   '(close f)',
   '_.QUIT _Y'
 ) | Set-Content -Encoding ascii $scr

@@ -33,7 +33,7 @@ export async function ZOOM(ed: Editor): Promise<void> {
         const ids = await ed.getSelection('Select objects');
         let b = emptyBox();
         for (const id of ids) { const e = ed.doc.get(id); if (e) b = boxUnion(b, ed.doc.box(e)); }
-        if (boxValid(b)) { v.pushHistory(); v.fit(b); ed.redraw(); }
+        if (boxValid(b)) { v.pushHistory(); ed.fitView(b); ed.redraw(); }
         return;
       }
       case 'Center': {
@@ -44,9 +44,21 @@ export async function ZOOM(ed: Editor): Promise<void> {
         return;
       }
       case 'Scale': {
-        const t = await ed.getText('Enter a scale factor (nX or nXP):');
-        const n = parseFloat(t);
-        if (n > 0) { v.pushHistory(); v.scale *= n; ed.redraw(); }
+        const t = (await ed.getText('Enter a scale factor (nX or nXP):')).trim().toUpperCase();
+        // nXP: relative to paper space, i.e. the viewport scale (1/50XP = 1:50).
+        const m = /^([\d.,]+)(?:\s*\/\s*([\d.,]+))?\s*(XP|X)?$/.exec(t);
+        if (!m) { ed.print('Requires a scale factor such as 2X or 1/50XP.', 'error'); return; }
+        const n = parseFloat(m[1].replace(',', '.')) / (m[2] ? parseFloat(m[2].replace(',', '.')) : 1);
+        if (!(n > 0)) return;
+        if (m[3] === 'XP') {
+          const vp = ed.activeViewport();
+          if (!vp) { ed.print('nXP requires an active layout viewport (MSPACE).', 'error'); return; }
+          ed.setViewportScale(vp.id, n);
+          return;
+        }
+        v.pushHistory();
+        v.scale *= n;
+        ed.redraw();
         return;
       }
       default: {
@@ -54,7 +66,7 @@ export async function ZOOM(ed: Editor): Promise<void> {
         if (!isPt(a)) return;
         const b = await ed.point('Specify opposite corner:', { preview: (q) => [rectOf(a, q)] });
         if (!isPt(b)) return;
-        v.pushHistory(); v.fit(boxFromPts(a, b), 0); ed.redraw();
+        v.pushHistory(); ed.fitView(boxFromPts(a, b), 0); ed.redraw();
         return;
       }
     }

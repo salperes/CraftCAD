@@ -17,9 +17,13 @@ import { aboutDialog, APP_VERSION } from './ui/about.ts';
 import { fmtNum } from './core/geom.ts';
 import { ALL_SNAPS, SNAP_LABELS } from './app/snap.ts';
 import { editMText, activeTextEditor } from './ui/texteditor.ts';
-import { textEditorContext, hatchContext, blockEditorContext } from './ui/contexts.ts';
+import { textEditorContext, hatchContext, blockEditorContext, layoutContext } from './ui/contexts.ts';
 import { draftingSettings, dimStyleManager, quickSelect } from './ui/settings.ts';
 import { plotDialog } from './ui/plot.ts';
+import { pageSetupDialog } from './ui/pagesetup.ts';
+import { copyLayout, deleteLayout, renameLayout, VP_SCALES, scaleLabel } from './app/commands/layout.ts';
+import type { Layout } from './core/document.ts';
+import { vpScale } from './core/entities.ts';
 import { loadPrefs, watchPrefs } from './app/prefs.ts';
 
 // ---------------------------------------------------------------------------
@@ -108,14 +112,94 @@ function renderTabs(): void {
 // Status bar
 
 const layoutTabs = h('div', { class: 'layout-tabs' });
-for (const [name, active] of [['Model', true], ['Layout1', false], ['Layout2', false]] as [string, boolean][]) {
-  const t = h('div', { class: 'ltab' + (active ? ' active' : '') }, name);
-  if (!active) t.addEventListener('click', () => cmdline.print('Paper space layouts are not supported yet.', 'info'));
-  layoutTabs.append(t);
+
+/** Switches tabs, cancelling a running command first (like AutoCAD). */
+async function switchTab(l: Layout | null): Promise<void> {
+  if (ed.doc.layout === l && ed.activeVp === null) return;
+  if (ed.busy) await ed.cancel();
+  ed.setLayout(l);
+}
+
+/** Inline rename on the tab itself. */
+function renameTab(t: HTMLElement, l: Layout): void {
+  const inp = h('input', { class: 'ltab-edit', value: l.name }) as HTMLInputElement;
+  t.replaceChildren(inp);
+  inp.focus();
+  inp.select();
+  let done = false;
+  const finish = (save: boolean) => {
+    if (done) return;
+    done = true;
+    const v = inp.value.trim();
+    if (save && v && v !== l.name) renameLayout(ed, l, v);
+    renderLayoutTabs();
+  };
+  inp.addEventListener('keydown', (ev) => {
+    ev.stopPropagation();
+    if (ev.key === 'Enter') finish(true);
+    else if (ev.key === 'Escape') finish(false);
+  });
+  inp.addEventListener('blur', () => finish(true));
+}
+
+function newLayout(): void {
+  const l = ed.doc.addLayout(ed.doc.uniqueLayoutName());
+  renderLayoutTabs();
+  cmdline.print(`Layout "${l.name}" created.`, 'info');
+}
+
+function layoutTabMenu(l: Layout | null, t: HTMLElement, at: { x: number; y: number }): void {
+  const items: MenuEntry[] = [
+    { label: 'New Layout', action: newLayout },
+  ];
+  if (l) {
+    items.push(
+      { label: 'Delete', disabled: ed.doc.layouts.length <= 1, action: () => void (async () => { if ((await confirmDialog('CraftCAD', `The layout "${l.name}" will be permanently deleted.`, ['OK', 'Cancel'])) === 'OK') { if (ed.busy) await ed.cancel(); deleteLayout(ed, l); } })() },
+      { label: 'Rename', action: () => renameTab(t, l) },
+      { label: 'Move or Copy…', submenu: [
+        { label: 'Move Left', disabled: ed.doc.layouts.indexOf(l) === 0, action: () => moveLayout(l, -1) },
+        { label: 'Move Right', disabled: ed.doc.layouts.indexOf(l) === ed.doc.layouts.length - 1, action: () => moveLayout(l, 1) },
+        { sep: true, label: 'Create a Copy', action: () => { copyLayout(ed, l, uniqueCopyName(l.name)); renderLayoutTabs(); } },
+      ] },
+      { sep: true, label: 'Page Setup Manager…', action: () => void (async () => { await switchTab(l); await pageSetupDialog(ed, l); })() },
+      { label: 'Plot…', action: () => void (async () => { await switchTab(l); await ed.runCommand('PLOT'); })() },
+    );
+  }
+  items.push({ sep: true, label: 'Activate Model Tab', disabled: !ed.doc.layout, action: () => void switchTab(null) });
+  showMenu(items, at, 'shortcut-menu');
+}
+
+function uniqueCopyName(base: string): string {
+  for (let i = 2; ; i++) if (!ed.doc.layoutByName(`${base} (${i})`)) return `${base} (${i})`;
+}
+
+function moveLayout(l: Layout, d: number): void {
+  const a = ed.doc.layouts, i = a.indexOf(l), j = i + d;
+  if (j < 0 || j >= a.length) return;
+  [a[i], a[j]] = [a[j], a[i]];
+  ed.doc.modified = true;
+  renderLayoutTabs();
+}
+
+function renderLayoutTabs(): void {
+  layoutTabs.replaceChildren();
+  const tabs: (Layout | null)[] = [null, ...ed.doc.layouts];
+  for (const l of tabs) {
+    const active = ed.doc.layout === l;
+    const t = h('div', { class: 'ltab' + (active ? ' active' : ''), title: l ? `${l.name} — ${l.paper.name}` : 'Model space' }, l?.name ?? 'Model');
+    t.addEventListener('click', () => void switchTab(l));
+    t.addEventListener('contextmenu', (ev) => { ev.preventDefault(); layoutTabMenu(l, t, { x: ev.clientX, y: ev.clientY }); });
+    if (l) t.addEventListener('dblclick', () => renameTab(t, l));
+    layoutTabs.append(t);
+  }
+  const plus = h('div', { class: 'ltab plus', title: 'New layout' }, '+');
+  plus.addEventListener('click', newLayout);
+  layoutTabs.append(plus);
 }
 const status = h('div', { class: 'statusbar' });
 const coords = h('div', { class: 'coords' });
 bottombar.append(layoutTabs, coords, status);
+renderLayoutTabs();
 
 interface Toggle { key: keyof Settings; ico: string; title: string; fkey: string; menu?: () => MenuEntry[] }
 const toggles: Toggle[] = [
@@ -137,7 +221,24 @@ const toggles: Toggle[] = [
   { key: 'dyn', ico: 'dyn', title: 'Dynamic input', fkey: 'F12' },
 ];
 const toggleEls = new Map<string, HTMLElement>();
-status.append(h('div', { class: 'sb-model' }, 'MODEL'));
+// MODEL / PAPER: in a layout, toggles between paper space and the last viewport.
+const spaceBtn = h('button', { class: 'sb-model' }, 'MODEL');
+spaceBtn.addEventListener('click', () => void (async () => {
+  if (!ed.doc.layout) return;
+  if (ed.busy) await ed.cancel();
+  await ed.runCommand(ed.activeVp === null ? 'MSPACE' : 'PSPACE');
+})());
+tooltip(spaceBtn, 'Model or paper space', 'In a layout, switches between editing the sheet and the model inside a viewport');
+// Viewport scale of the active (or selected) viewport.
+const vpScaleBtn = h('button', { class: 'sb-vpscale', hidden: true });
+vpScaleBtn.addEventListener('click', () => {
+  const vp = ed.scaleViewport();
+  if (!vp) return;
+  const cur = scaleLabel(vpScale(vp));
+  showMenu(VP_SCALES.map(([name, k]) => ({ label: name, checked: name === cur, action: () => ed.setViewportScale(vp.id, k) })), vpScaleBtn, 'status-menu');
+});
+tooltip(vpScaleBtn, 'Viewport scale', 'Scale of the active or selected layout viewport');
+status.append(spaceBtn, vpScaleBtn);
 for (const t of toggles) {
   const wrap = h('div', { class: 'sb-item' });
   const btn = h('button', { class: 'sb-btn', html: icon(t.ico, 18) });
@@ -164,8 +265,22 @@ menuBtn.addEventListener('click', () => showMenu([
 ], menuBtn, 'status-menu'));
 status.append(propsBtn, menuBtn);
 
+/** Viewport scale button: shown for the active or the selected layout viewport. */
+let vpScaleText = '';
+function updateVpScale(): void {
+  const vp = ed.scaleViewport();
+  const t = vp ? scaleLabel(vpScale(vp)) : '';
+  if (t === vpScaleText) return;
+  vpScaleText = t;
+  vpScaleBtn.hidden = !vp;
+  vpScaleBtn.innerHTML = `${escapeHtml(t)} &#9662;`;
+}
+
 function updateStatus(): void {
   for (const [k, el] of toggleEls) el.classList.toggle('on', !!(ed.settings as unknown as Record<string, unknown>)[k]);
+  spaceBtn.textContent = ed.doc.layout && ed.activeVp === null ? 'PAPER' : 'MODEL';
+  spaceBtn.classList.toggle('in-layout', !!ed.doc.layout);
+  updateVpScale();
   ed.redraw();
   ed.updateCursor();
 }
@@ -223,8 +338,12 @@ async function loadFile(file: File, handle: FileHandle | null): Promise<void> {
     fileHandle = handle;
     currentFormat = isDwg ? fmt(DWG_VERSION_FMT[head] ?? 'dwg2018') : fmt('dxf2000');
     ed.selection.clear();
+    ed.resetSpaces();
     await ed.zoomExtents();
-    cmdline.print(`${r.entities} objects, ${r.layers} layers, ${r.blocks} blocks (${r.version}, via ${r.via}) loaded in ${((performance.now() - t0) / 1000).toFixed(2)} s`, 'info');
+    // Drawings saved with a layout tab open come back on that tab.
+    const lay = r.activeLayout ? ed.doc.layoutByName(r.activeLayout) : undefined;
+    if (lay) ed.setLayout(lay);
+    cmdline.print(`${r.entities} objects${ed.doc.layouts.length ? `, ${ed.doc.layouts.length} layouts` : ''}, ${r.layers} layers, ${r.blocks} blocks (${r.version}, via ${r.via}) loaded in ${((performance.now() - t0) / 1000).toFixed(2)} s`, 'info');
     for (const warn of r.warnings) cmdline.print('  ' + warn, 'info');
     if (isDwg && !(await converterStatus()).available) cmdline.print('No DWG converter found: saving will use DXF. Install ODA File Converter to save DWG.', 'info');
   } catch (err) {
@@ -232,6 +351,8 @@ async function loadFile(file: File, handle: FileHandle | null): Promise<void> {
     cmdline.print(`Could not open ${file.name}: ${(err as Error).message}`, 'error');
   }
   renderTabs();
+  renderLayoutTabs();
+  updateStatus();
   ribbon.refresh();
 }
 
@@ -340,6 +461,7 @@ let untitled = 1;
 async function newDrawing(): Promise<void> {
   if (inBlockEditor() || !(await confirmDiscard())) return;
   ed.doc.reset();
+  ed.resetSpaces();
   ed.doc.fileName = `Drawing${++untitled}.dwg`;
   fileHandle = null;
   currentFormat = null;
@@ -347,6 +469,8 @@ async function newDrawing(): Promise<void> {
   ed.view.fit({ minX: 0, minY: 0, maxX: 420, maxY: 297 });
   ed.doc.emit('all');
   renderTabs();
+  renderLayoutTabs();
+  updateStatus();
 }
 
 canvasWrap.addEventListener('dragover', (e) => { e.preventDefault(); canvasWrap.classList.add('drop'); });
@@ -367,8 +491,8 @@ const ui: EditorUI = {
   onInput: (t) => cmdline.setInput(t),
   print: (line, kind) => cmdline.print(line, kind ?? 'info'),
   onStatus: () => { updateStatus(); ribbon.refresh(); updateContext(); renderTabs(); },
-  onSelection: () => { ribbon.refresh(); props.refresh(); updateContext(); },
-  onCursor: (p) => { coords.textContent = `${fmtNum(p.x, 4)}, ${fmtNum(p.y, 4)}, 0.0000`; cmdline.updateDyn(); },
+  onSelection: () => { ribbon.refresh(); props.refresh(); updateContext(); updateVpScale(); },
+  onCursor: (p) => { updateVpScale(); coords.textContent = `${fmtNum(p.x, 4)}, ${fmtNum(p.y, 4)}, 0.0000`; cmdline.updateDyn(); },
   onCommand: (name) => { canvasWrap.classList.toggle('in-command', !!name); updateContext(); },
   onDocChanged: () => { scheduleUi(); },
   editText: (o) => editTextInPlace(ed, canvasWrap, o),
@@ -389,6 +513,8 @@ const ui: EditorUI = {
   dimStyleManager: () => dimStyleManager(ed, () => ed.redraw()),
   quickSelect: () => quickSelect(ed),
   about: () => aboutDialog('about'),
+  onSpace: () => { renderLayoutTabs(); updateStatus(); },
+  pageSetup: (l) => pageSetupDialog(ed, l),
 };
 
 /** Shows the contextual ribbon tab that matches the current state. */
@@ -403,6 +529,7 @@ function updateContext(): void {
     return;
   }
   if (ed.blockEdit) { ribbon.setContext(blockEditorContext(ed)); return; }
+  if (ed.doc.layout) { ribbon.setContext(layoutContext(ed, () => { const l = ed.doc.layout; if (l) void pageSetupDialog(ed, l); })); ribbon.refreshContext(); return; }
   ribbon.setContext(null);
 }
 ed.ui = ui;

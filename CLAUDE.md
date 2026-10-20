@@ -2,7 +2,7 @@
 
 Web-based 2D CAD with AutoCAD-style commands, DXF read/write and DWG read/write (via a local converter).
 
-**Mevcut Versiyon:** 0.4.2 (Rev. ID 12)
+**Mevcut Versiyon:** 0.5.0 (Rev. ID 13)
 
 ## Versioning and changelog
 
@@ -24,7 +24,7 @@ npm run electron # build + run the desktop app (unset ELECTRON_RUN_AS_NODE when 
 npm run dist:win # Windows installer (NSIS) in release/
 ```
 
-UI checks: `test/ui-shot.mjs`, `test/perf.mjs`, `test/otrack.mjs`, `test/dwgsave.mjs` drive the running dev server with Playwright (headless Chromium). `test/acad-check.ps1` validates DXF/DWG output with AutoCAD Core Console when installed.
+UI checks: `test/ui-shot.mjs`, `test/perf.mjs`, `test/otrack.mjs`, `test/gridsnap.mjs`, `test/layout.mjs`, `test/dwgsave.mjs` drive the running dev server with Playwright (headless Chromium). `test/acad-check.ps1` validates DXF/DWG output with AutoCAD Core Console when installed.
 
 ## Layout
 

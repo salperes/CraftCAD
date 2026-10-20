@@ -76,10 +76,18 @@ export interface InsertEnt extends Base {
   cols?: number; rows?: number; colSpacing?: number; rowSpacing?: number;
 }
 export interface SolidEnt extends Base { type: 'solid'; pts: Vec[] }
+/**
+ * Layout viewport (paper space only): a w×h window centered at c on the sheet that shows
+ * model space around vc; vh is the model height visible, so the scale is h / vh.
+ */
+export interface ViewportEnt extends Base {
+  type: 'viewport'; c: Vec; w: number; h: number; vc: Vec; vh: number;
+  locked?: boolean; off?: boolean;
+}
 
 export type Entity =
   | LineEnt | CircleEnt | ArcEnt | PolylineEnt | EllipseEnt | SplineEnt | PointEnt
-  | TextEnt | MTextEnt | HatchEnt | DimEnt | InsertEnt | SolidEnt;
+  | TextEnt | MTextEnt | HatchEnt | DimEnt | InsertEnt | SolidEnt | ViewportEnt;
 export type EntityType = Entity['type'];
 
 /** Distributes Omit across the union so `type` stays a discriminant. */
@@ -119,7 +127,31 @@ export interface DocCtx {
 export const ENT_NAMES: Record<EntityType, string> = {
   line: 'Line', circle: 'Circle', arc: 'Arc', polyline: 'Polyline', ellipse: 'Ellipse', spline: 'Spline',
   point: 'Point', text: 'Text', mtext: 'MText', hatch: 'Hatch', dimension: 'Dimension', insert: 'Block Reference', solid: 'Solid',
+  viewport: 'Viewport',
 };
+
+/** Corners of a layout viewport, counter-clockwise from lower left. */
+export function vpCorners(e: Pick<ViewportEnt, 'c' | 'w' | 'h'>): Vec[] {
+  const x0 = e.c.x - e.w / 2, y0 = e.c.y - e.h / 2, x1 = e.c.x + e.w / 2, y1 = e.c.y + e.h / 2;
+  return [{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }];
+}
+
+/** Paper units per model unit shown in a viewport. */
+export const vpScale = (e: Pick<ViewportEnt, 'h' | 'vh'>): number => (e.vh > 0 ? e.h / e.vh : 1);
+
+/** Model point → paper point through a viewport. */
+export function vpToPaper(e: ViewportEnt, p: Vec): Vec {
+  const k = vpScale(e);
+  return { x: e.c.x + (p.x - e.vc.x) * k, y: e.c.y + (p.y - e.vc.y) * k };
+}
+
+/** Resizes a viewport to the box a–b keeping its scale and the model position on the sheet. */
+export function vpResize(e: ViewportEnt, a: Vec, b: Vec): ViewportEnt {
+  const w = Math.max(Math.abs(b.x - a.x), 1e-6), h = Math.max(Math.abs(b.y - a.y), 1e-6);
+  const c = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  const k = vpScale(e);
+  return { ...e, c, w, h, vh: h / k, vc: { x: e.vc.x + (c.x - e.c.x) / k, y: e.vc.y + (c.y - e.c.y) / k } };
+}
 
 // ---------------------------------------------------------------------------
 // Text measurement
@@ -506,6 +538,7 @@ export function entBox(e: Entity, ctx: DocCtx, depth = 0): Box {
     case 'text': case 'mtext': for (const p of textCorners(e)) boxAdd(b, p); return b;
     case 'hatch': for (const l of e.loops) for (const p of l.pts) boxAdd(b, p); return b;
     case 'solid': for (const p of e.pts) boxAdd(b, p); return b;
+    case 'viewport': for (const p of vpCorners(e)) boxAdd(b, p); return b;
     case 'dimension': {
       const blk = e.block ? ctx.blocks.get(e.block) : undefined;
       if (blk && depth < MAX_BLOCK_DEPTH) {
@@ -581,6 +614,7 @@ export function entPrims(e: Entity, ctx: DocCtx, maxErr = 0.01, depth = 0): Prim
     case 'point': out.push(seg(e.p, e.p)); break;
     case 'text': case 'mtext': polyPts(textCorners(e), true, out); break;
     case 'solid': polyPts(e.pts, true, out); break;
+    case 'viewport': polyPts(vpCorners(e), true, out); break;
     case 'hatch':
       for (const l of e.loops) out.push(...polylineSegPrims({ pts: l.pts, bulges: l.bulges, closed: true }));
       break;
@@ -623,6 +657,7 @@ export function closedOutline(e: Entity, maxErr: number): Vec[] | null {
     }
     case 'spline': return e.closed ? flattenSpline(e, maxErr) : null;
     case 'solid': return e.pts.slice();
+    case 'viewport': return vpCorners(e);
     default: return null;
   }
 }
@@ -713,6 +748,12 @@ export function entSnaps(e: Entity, ctx: DocCtx, depth = 0): SnapPt[] {
     case 'point': s.push({ kind: 'node', p: e.p }); break;
     case 'text': case 'mtext': s.push({ kind: 'ins', p: e.p }); break;
     case 'solid': for (const p of e.pts) s.push({ kind: 'end', p }); break;
+    case 'viewport': {
+      const k = vpCorners(e);
+      for (let i = 0; i < 4; i++) s.push({ kind: 'end', p: k[i] }, { kind: 'mid', p: mid(k[i], k[(i + 1) % 4]) });
+      s.push({ kind: 'gcen', p: e.c });
+      break;
+    }
     case 'dimension': s.push({ kind: 'node', p: e.p1 }, { kind: 'node', p: e.p2 }, { kind: 'node', p: e.loc }); break;
     case 'hatch': break;
     case 'insert': {
@@ -744,6 +785,7 @@ export function entGrips(e: Entity): Vec[] {
     case 'point': return [e.p];
     case 'text': case 'mtext': return [e.p];
     case 'solid': return e.pts.slice();
+    case 'viewport': return vpCorners(e);
     case 'dimension': return e.dimType === 'angular' ? [e.p2, e.p3 ?? e.p2, e.loc] : [e.p1, e.p2, e.loc];
     case 'insert': return [e.p];
     case 'hatch': {
@@ -808,6 +850,7 @@ export function entMoveGrip(e: Entity, i: number, p: Vec): Entity {
     case 'point': return { ...e, p };
     case 'text': case 'mtext': return { ...e, p };
     case 'solid': { const pts = e.pts.slice(); pts[i] = p; return { ...e, pts }; }
+    case 'viewport': return vpResize(e, vpCorners(e)[(i + 2) % 4], p);
     case 'dimension':
       if (e.dimType === 'angular') {
         if (i === 0) return { ...e, p2: p, block: undefined };
@@ -865,6 +908,7 @@ export function entTransform(e: Entity, m: Mat, mirrText = false): Entity {
       return { ...e, p: P(e.p), h: e.h * s, rot, ...(e.type === 'mtext' ? { width: e.width * s } : {}) } as Entity;
     }
     case 'solid': return { ...e, pts: e.pts.map(P) };
+    case 'viewport': return { ...e, c: P(e.c), w: e.w * s, h: e.h * s, vh: e.vh * s };
     case 'hatch': {
       const rotA = mapAng(m, 0);
       return {
@@ -1019,6 +1063,7 @@ export function entDescribe(e: Entity, ctx: DocCtx): string[] {
     case 'point': L.push(`at point ${P(e.p)}`); break;
     case 'spline': L.push(`degree ${e.degree}`, `control points ${e.ctrl.length}`); break;
     case 'solid': e.pts.forEach((p) => L.push(`point ${P(p)}`)); break;
+    case 'viewport': L.push(`center point, ${P(e.c)}`, `width ${fmtNum(e.w)}  height ${fmtNum(e.h)}`, `view center ${P(e.vc)}`, `scale 1:${fmtNum(1 / vpScale(e))}`, e.locked ? 'Display locked' : 'Display not locked'); break;
   }
   return L;
 }

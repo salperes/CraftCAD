@@ -66,6 +66,29 @@ onu yakalar (`+`). İmleç yakalanan noktanın yatay/dikey hizasına gelince kes
 kilitlenir; iki hizanın ya da hizanın polar izleme çizgisiyle kesişimine snap yapılır. İz çizgisi
 üzerindeyken sayı yazmak o mesafeyi yakalanan noktadan uygular. Aynı noktada tekrar beklemek onu bırakır.
 
+## Layout'lar (paper space)
+
+Alt kısımdaki **Model | Layout1 | Layout2 | +** sekmeleri AutoCAD'deki gibi çalışır. Layout'ta gri zemin
+üzerinde beyaz kağıt ve kesik çizgili yazdırma sınırı görünür; paper space'in orijini yazdırılabilir
+alanın sol alt köşesidir ve birimi mm'dir. Antet, not ve ölçüler kağıda bütün komutlarla çizilir.
+
+- **Sekmeler:** tıklayarak geçiş, çift tıkla yeniden adlandırma, sağ tık menüsü (New Layout, Delete,
+  Rename, Move Left/Right, Create a Copy, Page Setup Manager, Plot, Activate Model Tab), `+` ile yeni layout.
+  İlk kez açılan boş layout'a model çiziminin tamamını gösteren bir viewport otomatik eklenir.
+- **Viewport'lar:** `MVIEW` (MV): iki köşe, `Fit` (yazdırma alanı), `2` / `4` bölmeli, `ON`/`OFF`, `Lock`.
+  Viewport'lar grip'lerle boyutlandırılır, MOVE/COPY/STRETCH/ERASE ile düzenlenir; özellikler paletinde
+  merkez, boyut, açık/kapalı, Display locked, Standard scale ve Custom scale vardır.
+- **MSPACE / PSPACE:** viewport'un içine çift tıklayınca (ya da `MS`, durum çubuğunda PAPER düğmesi) model
+  space viewport içinden düzenlenir; aktif viewport mavi çerçeveyle gösterilir, pan/zoom yalnızca onun
+  görünümünü değiştirir. Dışarıya çift tıklamak ya da `PS` kağıda döner. Kilitli viewport'ta zoom kağıda uygulanır.
+- **Ölçek:** durum çubuğundaki ölçek düğmesi (1:1 … 1:5000, 2:1 …) aktif ya da seçili viewport'un
+  ölçeğini ayarlar; MSPACE'te `ZOOM` → `Scale` → `1/50XP` de 1:50 yapar.
+- **PAGESETUP:** kağıt boyutu (ISO A4–A0, ANSI A/B, özel), yön ve kenar boşlukları. **PLOT** layout'ta
+  sayfayı 1:1 basar.
+- **LAYOUT** (LO): New, Copy, Delete, Rename, Set, `?`; `TILEMODE` ve `CTAB` sistem değişkenleri.
+- **Dosya:** layout'lar, sekme sırası, sayfa boyutu, paper space nesneleri ve viewport'lar (ölçek,
+  kilit, açık/kapalı) DXF/DWG'den okunur ve yazılır. Layout sekmesi açıkken kaydedilen çizim o sekmede açılır.
+
 ## Masaüstü uygulaması (Electron)
 
 ```bash
@@ -102,7 +125,8 @@ yoksa tarayıcıdaki LibreDWG kullanılır.
 
 ## Bilinen sınırlar
 
-- Yalnızca model space destekleniyor; layout ve paper space içeriği okunmuyor.
+- Viewport'lar dikdörtgen gösterilir (twist ve dikdörtgen olmayan kırpma uygulanmaz); viewport'a özel
+  katman dondurma (VPLAYER) ve annotative ölçekleme yok.
 - MULTILEADER yalnızca metin olarak, ACAD_TABLE blok olarak okunuyor; SHX fontları yerine sistem
   fontu kullanılıyor.
 

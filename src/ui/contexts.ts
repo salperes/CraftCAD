@@ -156,3 +156,38 @@ export function blockEditorContext(ed: Editor): Context {
 }
 
 export { icon };
+
+/** "Layout" tab shown while a layout tab is active. */
+export function layoutContext(ed: Editor, onPageSetup: () => void): Context {
+  const run = (m: string) => () => void ed.runMacro(m);
+  return {
+    key: 'layout', name: 'Layout',
+    build: (body) => {
+      const l = ed.doc.layout;
+      body.append(
+        ctxPanel('Layout',
+          ctxBig('New', 'layoutNew', run('LAYOUT;New')),
+          ctxBig('Page Setup', 'pageSetup', onPageSetup),
+          ctxCol(h('div', { class: 'ctx-note' }, l ? `${l.name}` : ''), h('div', { class: 'ctx-note' }, l ? l.paper.name : '')),
+        ),
+        ctxPanel('Layout Viewports',
+          ctxBig('Rectangular', 'viewport', run('MVIEW')),
+          ctxCol(
+            ctxSmall('Fit to printable area', 'viewport', run('MVIEW;Fit')),
+            ctxSmall('Two viewports', 'viewport2', run('MVIEW;2')),
+            ctxSmall('Four viewports', 'viewport4', run('MVIEW;4')),
+          ),
+          ctxCol(
+            ctxSmall('Lock', 'lockClosed', run('MVIEW;Lock;ON')),
+            ctxSmall('Unlock', 'lockOpen', run('MVIEW;Lock;OFF')),
+            ctxSmall('Turn off', 'bulbOff', run('MVIEW;OFF')),
+          ),
+        ),
+        ctxPanel('Space',
+          ctxBig(ed.activeVp === null ? 'Model Space' : 'Paper Space', ed.activeVp === null ? 'mspace' : 'pspace', run(ed.activeVp === null ? 'MSPACE' : 'PSPACE')),
+        ),
+        ctxPanel('Output', ctxBig('Plot', 'printer', run('PLOT'))),
+      );
+    },
+  };
+}

@@ -30,7 +30,9 @@ interface PlotCfg {
 
 let last: PlotCfg | null = null;
 
-function paperMm(c: PlotCfg): [number, number] {
+function paperMm(c: PlotCfg, ed?: Editor): [number, number] {
+  const l = ed?.doc.layout;
+  if (l) return [l.paper.w, l.paper.h];
   const [a, b] = PAPERS[c.paper];
   return c.landscape ? [Math.max(a, b), Math.min(a, b)] : [Math.min(a, b), Math.max(a, b)];
 }
@@ -44,6 +46,16 @@ function plotBox(ed: Editor, c: PlotCfg): Box | null {
 
 /** Builds the plot viewport for a canvas of the given pixel size (pixels per mm = k). */
 function plotView(ed: Editor, c: PlotCfg, k: number, wpx: number, hpx: number): { v: Viewport; scaleText: string } | null {
+  const l = ed.doc.layout;
+  if (l) {
+    // Layout: the whole sheet at 1:1 (paper units are mm).
+    const v = new Viewport();
+    v.resize(wpx, hpx);
+    v.scale = k;
+    v.cx = l.paper.w / 2 - l.paper.margins[0];
+    v.cy = l.paper.h / 2 - l.paper.margins[1];
+    return { v, scaleText: '1 : 1 (layout sheet)' };
+  }
   const b = plotBox(ed, c);
   if (!b) return null;
   const v = new Viewport();
@@ -64,13 +76,13 @@ function plotView(ed: Editor, c: PlotCfg, k: number, wpx: number, hpx: number): 
 }
 
 function renderPlot(ed: Editor, c: PlotCfg, k: number): HTMLCanvasElement | null {
-  const [pw, ph] = paperMm(c);
+  const [pw, ph] = paperMm(c, ed);
   const canvas = document.createElement('canvas');
   canvas.width = Math.round(pw * k);
   canvas.height = Math.round(ph * k);
   const pv = plotView(ed, c, k, canvas.width, canvas.height);
   if (!pv) return null;
-  ed.renderer.plotTo(canvas, ed.doc, pv.v, { mono: c.mono, lineWidthPx: Math.max(1, c.lw * k) });
+  ed.renderer.plotTo(canvas, ed.doc, pv.v, { mono: c.mono, lineWidthPx: Math.max(1, c.lw * k) }, ed.doc.layout ?? undefined);
   return canvas;
 }
 
@@ -85,7 +97,9 @@ export function plotDialog(ed: Editor): Promise<void> {
     const x = h('button', { class: 'modal-x', html: '&times;' });
     const body = h('div', { class: 'modal-body plot-body' });
     const foot = h('div', { class: 'modal-foot' });
-    win.append(h('div', { class: 'modal-head' }, h('span', {}, 'Plot - Model'), x), body, foot);
+    const lay = ed.doc.layout;
+    const tab = lay?.name ?? 'Model';
+    win.append(h('div', { class: 'modal-head' }, h('span', {}, `Plot - ${tab}`), x), body, foot);
     back.append(win);
     document.body.append(back);
     const close = () => { back.remove(); last = { ...c }; resolve(); };
@@ -135,13 +149,20 @@ export function plotDialog(ed: Editor): Promise<void> {
     const preview = h('canvas', { class: 'plot-preview' }) as HTMLCanvasElement;
     const sizeInfo = h('div', { class: 'ds-note' });
 
-    const left = h('div', { class: 'plot-col' },
-      group('Printer/plotter', field('Name', sel([['pdf', 'PDF / System printer (browser print dialog)'], ['png', 'PNG image file']], c.device, (v) => (c.device = v as PlotCfg['device'])))),
+    const modelGroups = [
       group('Paper size', sel(Object.keys(PAPERS).map((k) => [k, k]), c.paper, (v) => (c.paper = v)),
         h('div', { class: 'plot-orient' }, sel([['1', 'Landscape'], ['0', 'Portrait']], c.landscape ? '1' : '0', (v) => (c.landscape = v === '1')))),
       group('Plot area', field('What to plot', areaSel), winBtn),
       group('Plot offset', chk('Center the plot', c.center, (v) => (c.center = v))),
       group('Plot scale', chk('Fit to paper', c.fit, (v) => (c.fit = v)), scaleRow, scaleInfo),
+    ];
+    const layoutGroups = lay ? [
+      group('Paper size', h('div', { class: 'ds-note' }, `${lay.paper.name} — ${+lay.paper.w.toFixed(2)} x ${+lay.paper.h.toFixed(2)} mm (Page Setup)`)),
+      group('Plot area', h('div', { class: 'ds-note' }, 'Layout sheet, scale 1:1'), scaleInfo),
+    ] : [];
+    const left = h('div', { class: 'plot-col' },
+      group('Printer/plotter', field('Name', sel([['pdf', 'PDF / System printer (browser print dialog)'], ['png', 'PNG image file']], c.device, (v) => (c.device = v as PlotCfg['device'])))),
+      ...(lay ? layoutGroups : modelGroups),
     );
     const right = h('div', { class: 'plot-col' },
       group('Plot style table (pen assignments)', sel([['color', 'None (plot colors)'], ['mono', 'monochrome.ctb']], c.mono ? 'mono' : 'color', (v) => (c.mono = v === 'mono'))),
@@ -153,20 +174,21 @@ export function plotDialog(ed: Editor): Promise<void> {
 
     const update = () => {
       for (const el of [scaleIn1, scaleIn2]) el.disabled = c.fit;
-      const [pw, ph] = paperMm(c);
+      const [pw, ph] = paperMm(c, ed);
       const k = Math.min(300 / pw, 210 / ph);
       preview.width = Math.round(pw * k);
       preview.height = Math.round(ph * k);
       const pv = plotView(ed, c, k, preview.width, preview.height);
       if (pv) {
-        ed.renderer.plotTo(preview, ed.doc, pv.v, { mono: c.mono, lineWidthPx: 1 });
+        ed.renderer.plotTo(preview, ed.doc, pv.v, { mono: c.mono, lineWidthPx: 1 }, lay ?? undefined);
         scaleInfo.textContent = `Scale ${pv.scaleText}`;
         const g = preview.getContext('2d')!;
         g.setLineDash([3, 3]);
         g.strokeStyle = '#7a8aa0';
-        g.strokeRect(MARGIN * k + 0.5, MARGIN * k + 0.5, (pw - 2 * MARGIN) * k, (ph - 2 * MARGIN) * k);
+        const [ml, mb, mr, mt] = lay ? lay.paper.margins : [MARGIN, MARGIN, MARGIN, MARGIN];
+        g.strokeRect(ml * k + 0.5, mt * k + 0.5, (pw - ml - mr) * k, (ph - mb - mt) * k);
       } else scaleInfo.textContent = 'Nothing to plot.';
-      const dpi = effectiveDpi(c);
+      const dpi = effectiveDpi(c, ed);
       sizeInfo.textContent = `${pw} x ${ph} mm at ${dpi} dpi${dpi < c.dpi ? ' (reduced to fit memory)' : ''}`;
     };
     update();
@@ -174,13 +196,13 @@ export function plotDialog(ed: Editor): Promise<void> {
     const ok = h('button', { class: 'btn primary' }, 'OK');
     const cancel = h('button', { class: 'btn' }, 'Cancel');
     ok.addEventListener('click', async () => {
-      const dpi = effectiveDpi(c);
+      const dpi = effectiveDpi(c, ed);
       const canvas = renderPlot(ed, c, dpi / 25.4);
       if (!canvas) { ed.print('Nothing to plot.', 'error'); return; }
-      const name = ed.doc.fileName.replace(/\.(dxf|dwg)$/i, '') + '-Model';
+      const name = ed.doc.fileName.replace(/\.(dxf|dwg)$/i, '') + '-' + tab.replace(/[\\/:*?"<>|]/g, '_');
       if (c.device === 'png') await savePng(canvas, name + '.png');
-      else printCanvas(canvas, paperMm(c), name);
-      ed.print(`Plot sent: ${c.paper}, ${c.landscape ? 'landscape' : 'portrait'}, ${dpi} dpi.`);
+      else printCanvas(canvas, paperMm(c, ed), name);
+      ed.print(lay ? `Plot sent: layout "${tab}", ${lay.paper.name}, ${dpi} dpi.` : `Plot sent: ${c.paper}, ${c.landscape ? 'landscape' : 'portrait'}, ${dpi} dpi.`);
       close();
     });
     cancel.addEventListener('click', close);
@@ -188,8 +210,8 @@ export function plotDialog(ed: Editor): Promise<void> {
   });
 }
 
-function effectiveDpi(c: PlotCfg): number {
-  const [pw, ph] = paperMm(c);
+function effectiveDpi(c: PlotCfg, ed: Editor): number {
+  const [pw, ph] = paperMm(c, ed);
   let dpi = c.dpi;
   // Keep the canvas under ~60 Mpx.
   while (dpi > 100 && (pw * dpi / 25.4) * (ph * dpi / 25.4) > 60e6) dpi = Math.round(dpi * 0.75);

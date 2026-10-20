@@ -93,8 +93,8 @@ export class GLLayer {
   }
 
   /** Tessellates all GL-drawable geometry for the given zoom level. */
-  build(doc: Drawing, scale: number, style: GLStyle): void {
-    const ext = doc.extents();
+  build(doc: Drawing, ents: Map<number, Entity>, scale: number, style: GLStyle): void {
+    const ext = doc.extents(ents);
     this.origin = ext.minX <= ext.maxX ? { x: (ext.minX + ext.maxX) / 2, y: (ext.minY + ext.maxY) / 2 } : { x: 0, y: 0 };
     const ox = this.origin.x, oy = this.origin.y;
     // Max chord error ≈ 0.25 px at the build zoom.
@@ -162,7 +162,7 @@ export class GLLayer {
       m = null;
     };
 
-    for (const e of doc.entities.values()) {
+    for (const e of ents.values()) {
       if (!doc.isVisible(e)) continue;
       emit(e, undefined, null, 0, tol);
     }
@@ -177,10 +177,19 @@ export class GLLayer {
   }
 
   draw(v: Viewport): void {
+    this.clear();
+    this.drawClip(v, null);
+  }
+
+  /** Draws without clearing, limited to a screen rectangle (CSS pixels) when given. */
+  drawClip(v: Viewport, clip: { x: number; y: number; w: number; h: number } | null): void {
     const gl = this.gl;
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    if (clip) {
+      const d = this.dpr;
+      gl.enable(gl.SCISSOR_TEST);
+      gl.scissor(Math.floor(clip.x * d), Math.floor(this.canvas.height - (clip.y + clip.h) * d), Math.ceil(clip.w * d), Math.ceil(clip.h * d));
+    } else gl.disable(gl.SCISSOR_TEST);
     if (!this.count) return;
     gl.useProgram(this.prog);
     // clip = (world - center) * scale * 2 / size ; world = local + origin
@@ -198,6 +207,7 @@ export class GLLayer {
 
   clear(): void {
     const gl = this.gl;
+    gl.disable(gl.SCISSOR_TEST);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
   }

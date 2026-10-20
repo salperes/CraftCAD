@@ -25,6 +25,8 @@ const OSMODE_BITS: [number, SnapKind][] = [
 const b = (v: number | string) => Number(v) !== 0;
 
 export const SYSVARS: Record<string, Sysvar> = {
+  TILEMODE: { desc: 'Model tab (1) or a layout tab (0)', kind: 'bool', get: (ed) => (ed.doc.layout ? 0 : 1), set: (ed, v) => { if (b(v)) ed.setLayout(null); else if (!ed.doc.layout && ed.doc.layouts[0]) ed.setLayout(ed.doc.layouts[0]); } },
+  CTAB: { desc: 'Current Model or layout tab', kind: 'str', get: (ed) => ed.doc.layout?.name ?? 'Model', set: (ed, v) => { const n = String(v); if (n.toUpperCase() === 'MODEL') { ed.setLayout(null); return; } const l = ed.doc.layoutByName(n); if (!l) return `Layout "${n}" not found.`; ed.setLayout(l); } },
   CURSORSIZE: { desc: 'Crosshair size as a percentage of the screen', kind: 'int', min: 1, max: 100, get: (ed) => ed.renderer.cursorSize, set: (ed, v) => { ed.renderer.cursorSize = Number(v); ed.redrawOverlay(); } },
   APERTURE: { desc: 'Object snap target size in pixels', kind: 'int', min: 1, max: 50, get: (ed) => ed.settings.aperture, set: (ed, v) => { ed.settings.aperture = Number(v); } },
   GRIDMODE: { desc: 'Grid display on/off', kind: 'bool', get: (ed) => (ed.settings.grid ? 1 : 0), set: (ed, v) => { ed.settings.grid = b(v); ed.ui.onStatus(); } },
@@ -189,6 +191,8 @@ export async function BEDIT(ed: Editor): Promise<void> {
     const t = entTransform(e, m);
     ents.set(t.id, t);
   }
+  // The block editor works on the Model tab.
+  if (ed.doc.layout && !ed.setLayout(null)) return;
   const v = ed.view;
   ed.clearSelection();
   const saved = ed.doc.swapSpace({ entities: ents, undo: [], redo: [] });

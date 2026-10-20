@@ -9,7 +9,7 @@ import {
 } from './geom.ts';
 import {
   type Entity, type NewEntity, type LineEnt, type ArcEnt, type PolylineEnt,
-  entGrips, entMoveGrip, entTransform, polylineSegPrims,
+  entGrips, entMoveGrip, entTransform, polylineSegPrims, vpResize,
 } from './entities.ts';
 import { mxTranslate } from './geom.ts';
 
@@ -514,6 +514,14 @@ export function stretchEntity(e: Entity, box: Box, delta: Vec): Entity | null {
     case 'line': return { ...e, p1: inside(e.p1) ? add(e.p1, delta) : e.p1, p2: inside(e.p2) ? add(e.p2, delta) : e.p2 };
     case 'polyline': return { ...e, pts: e.pts.map((p) => (inside(p) ? add(p, delta) : p)) };
     case 'solid': return { ...e, pts: e.pts.map((p) => (inside(p) ? add(p, delta) : p)) };
+    case 'viewport': {
+      if (flags.every(Boolean)) return moveAll();
+      const k = grips.map((p, i) => (flags[i] ? add(p, delta) : p));
+      // Edges follow their moved corners (left/right from corners 0/3 and 1/2, bottom/top from 0/1 and 2/3).
+      const x0 = flags[0] || flags[3] ? k[flags[0] ? 0 : 3].x : k[0].x, x1 = flags[1] || flags[2] ? k[flags[1] ? 1 : 2].x : k[1].x;
+      const y0 = flags[0] || flags[1] ? k[flags[0] ? 0 : 1].y : k[0].y, y1 = flags[2] || flags[3] ? k[flags[2] ? 2 : 3].y : k[2].y;
+      return vpResize(e, { x: Math.min(x0, x1), y: Math.min(y0, y1) }, { x: Math.max(x0, x1), y: Math.max(y0, y1) });
+    }
     case 'spline': return { ...e, ctrl: e.ctrl.map((p) => (inside(p) ? add(p, delta) : p)), fit: e.fit?.map((p) => (inside(p) ? add(p, delta) : p)) };
     case 'arc': {
       if (flags[0] && flags[2]) return moveAll();

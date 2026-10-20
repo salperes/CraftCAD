@@ -6,7 +6,8 @@ import {
   type NewEntity, type BlockDef, type TextEnt, type HatchLoop, type PatLine, type DimType, type SplineEnt, type DimStyle, type Entity,
   BYLAYER, flattenSpline, defaultDimStyle, ellipsePoint,
 } from '../core/entities.ts';
-import type { Layer, Linetype, Header } from '../core/document.ts';
+import type { Layer, Linetype, Header, PaperSetup } from '../core/document.ts';
+import { defaultPaper } from '../core/document.ts';
 
 export interface DxfData {
   version: string;
@@ -18,6 +19,20 @@ export interface DxfData {
   dimStyle: DimStyle;
   currentLayer?: string;
   warnings: string[];
+  /** Paper space entities by owning block name (upper case): *PAPER_SPACE, *PAPER_SPACE0… */
+  paper: Map<string, NewEntity[]>;
+  /** Layouts (without Model) in tab order, with the block that holds their entities. */
+  layouts: DxfLayout[];
+  /** $TILEMODE = 0: the drawing was saved with a layout tab active. */
+  paperActive: boolean;
+}
+
+export interface DxfLayout {
+  name: string;
+  order: number;
+  block: string;
+  paper: PaperSetup;
+  plot: Record<string, number | string>;
 }
 
 type Tag = [number, string];
@@ -118,7 +133,17 @@ export function readDxf(input: Uint8Array | string): DxfData {
   const tags = tokenize(text);
   const data: DxfData = {
     version: 'AC1009', entities: [], layers: [], linetypes: [], blocks: [], header: {}, dimStyle: defaultDimStyle(), warnings: [],
+    paper: new Map(), layouts: [], paperActive: false,
   };
+  const paperSink = (block: string): NewEntity[] => {
+    const k = block.toUpperCase();
+    let a = data.paper.get(k);
+    if (!a) data.paper.set(k, (a = []));
+    return a;
+  };
+  /** BLOCK_RECORD handle → name, to resolve LAYOUT owners. */
+  const blockRecords = new Map<string, string>();
+  let twisted = 0;
   const skipped = new Map<string, number>();
   let mleaders = 0;
 
@@ -163,6 +188,7 @@ export function readDxf(input: Uint8Array | string): DxfData {
     if (g('$DIMADEC', 70)) ds.dimadec = Math.max(0, num(g('$DIMADEC', 70), ds.dimadec));
     if (g('$DIMDSEP', 70)) ds.dimdsep = String.fromCharCode(num(g('$DIMDSEP', 70), 44));
     if (g('$CLAYER', 8)) data.currentLayer = g('$CLAYER', 8);
+    data.paperActive = g('$TILEMODE', 70) === '0';
   };
 
   const readTables = () => {
@@ -182,6 +208,8 @@ export function readDxf(input: Uint8Array | string): DxfData {
         if (rv.has(420)) l.trueColor = rv.num(420) & 0xffffff;
         if (rv.has(370)) l.lw = rv.num(370);
         data.layers.push(l);
+      } else if (rec.type === 'BLOCK_RECORD') {
+        blockRecords.set(rv.str(5).toUpperCase(), rv.str(2));
       } else if (rec.type === 'LTYPE') {
         const name = rv.str(2);
         if (!name || /^by(layer|block)$/i.test(name)) continue;
@@ -190,7 +218,8 @@ export function readDxf(input: Uint8Array | string): DxfData {
     }
   };
 
-  const readEntitiesUntil = (endTypes: string[], sink: NewEntity[]): Rec | null => {
+  /** Reads entities; paper space ones (67=1) go to `paper`. */
+  const readEntitiesUntil = (endTypes: string[], model: NewEntity[], paper: NewEntity[]): Rec | null => {
     let rec = nextRec();
     while (rec && !endTypes.includes(rec.type)) {
       if (rec.type === '') { rec = nextRec(); continue; }
@@ -199,6 +228,7 @@ export function readDxf(input: Uint8Array | string): DxfData {
       const emb = rec.tags.findIndex(([c]) => c === 101);
       if (emb >= 0) rec.tags.length = emb;
       const rv = new RecView(rec);
+      const sink = rv.num(67) === 1 ? paper : model;
       if (rec.type === 'POLYLINE') {
         const verts: RecView[] = [];
         let r2 = nextRec();
@@ -219,16 +249,19 @@ export function readDxf(input: Uint8Array | string): DxfData {
             }
             r2 = nextRec();
           }
-          if (ins && !(rv.num(67) === 1)) sink.push(ins);
+          if (ins) sink.push(ins);
           if (r2 && r2.type !== 'SEQEND') { rec = r2; continue; }
           rec = nextRec();
           continue;
         }
-        if (ins && rv.num(67) !== 1) sink.push(ins);
+        if (ins) sink.push(ins);
         rec = nextRec();
         continue;
       }
-      if (rv.num(67) !== 1 && rv.num(60) !== 1) {
+      if (rec.type === 'VIEWPORT') {
+        const vp = convViewport(rv);
+        if (vp) { sink.push(vp); if (Math.abs(rv.num(51)) > 1e-9) twisted++; }
+      } else if (rv.num(60) !== 1) {
         if (rec.type === 'MULTILEADER' || rec.type === 'MLEADER') mleaders++;
         const out = convEntity(rv);
         if (out === undefined) skipped.set(rec.type, (skipped.get(rec.type) ?? 0) + 1);
@@ -247,9 +280,11 @@ export function readDxf(input: Uint8Array | string): DxfData {
       const rv = new RecView(rec);
       const name = rv.str(2) || rv.str(3);
       const base = rv.pt(10);
-      const ents: NewEntity[] = [];
-      const end = readEntitiesUntil(['ENDBLK', 'ENDSEC'], ents);
-      if (!/^\*(model|paper)_space/i.test(name)) data.blocks.push({ name, base, entities: ents });
+      const isPaper = /^\*paper_space/i.test(name);
+      // Entities of non-active layouts live in their *Paper_SpaceN block.
+      const ents: NewEntity[] = isPaper ? paperSink(name) : [];
+      const end = readEntitiesUntil(['ENDBLK', 'ENDSEC'], ents, ents);
+      if (!isPaper && !/^\*model_space/i.test(name)) data.blocks.push({ name, base, entities: ents });
       if (end?.type === 'ENDSEC') return;
     }
   };
@@ -263,8 +298,17 @@ export function readDxf(input: Uint8Array | string): DxfData {
     if (sec === 'HEADER') readHeader(rec.tags);
     else if (sec === 'TABLES') readTables();
     else if (sec === 'BLOCKS') readBlocks();
-    else if (sec === 'ENTITIES') readEntitiesUntil(['ENDSEC'], data.entities);
-    else {
+    else if (sec === 'ENTITIES') readEntitiesUntil(['ENDSEC'], data.entities, paperSink('*Paper_Space'));
+    else if (sec === 'OBJECTS') {
+      let r = nextRec();
+      while (r && r.type !== 'ENDSEC') {
+        if (r.type === 'LAYOUT') {
+          const l = convLayout(r.tags, blockRecords);
+          if (l) data.layouts.push(l);
+        }
+        r = nextRec();
+      }
+    } else {
       let r = nextRec();
       while (r && r.type !== 'ENDSEC') r = nextRec();
     }
@@ -277,9 +321,13 @@ export function readDxf(input: Uint8Array | string): DxfData {
     for (const l of data.layers) l.on = true;
     data.warnings.push('All layers were marked off in the file; they have been turned on.');
   }
-  if (data.entities.length === 0 && data.blocks.some((b) => /^\*paper_space/i.test(b.name) || b.entities.length)) {
-    data.warnings.push('Model space is empty; paper space layouts are not supported yet.');
+  data.layouts.sort((a, b) => a.order - b.order);
+  // Paper space content without LAYOUT objects (R12 files): one default layout.
+  if (!data.layouts.length && [...data.paper.values()].some((a) => a.length)) {
+    const k = [...data.paper.keys()].find((n) => data.paper.get(n)!.length)!;
+    data.layouts.push({ name: 'Layout1', order: 1, block: k, paper: defaultPaper(), plot: {} });
   }
+  if (twisted) data.warnings.push(`${twisted} × twisted viewport shown without twist`);
   return data;
 }
 
@@ -413,6 +461,55 @@ function convEntity(rv: RecView): NewEntity | NewEntity[] | null | undefined {
     case 'VIEWPORT': case 'SEQEND': case 'ATTRIB': case 'VERTEX': return null;
     default: return undefined;
   }
+}
+
+/** Layout viewport; the sheet's own viewport (id 1) is implied by the layout and skipped. */
+function convViewport(rv: RecView): NewEntity | null {
+  if (rv.num(69) === 1) return null;
+  const w = rv.num(40), h = rv.num(41), vh = rv.num(45);
+  if (!(w > 0 && h > 0 && vh > 0)) return null;
+  const flags = rv.num(90);
+  const vp: NewEntity = { type: 'viewport', c: rv.pt(10), w, h, vc: rv.pt(12), vh, ...common(rv) };
+  if (flags & 16384) vp.locked = true;
+  if (flags & 131072 || rv.num(68, 1) === 0) vp.off = true;
+  return vp;
+}
+
+/** LAYOUT object → name, tab order, owning block and paper setup. */
+function convLayout(tags: Tag[], blockRecords: Map<string, string>): DxfLayout | null {
+  // Codes repeat between AcDbPlotSettings and AcDbLayout, so split by subclass.
+  const parts: Record<string, Tag[]> = {};
+  let cur = '';
+  for (const t of tags) {
+    if (t[0] === 100) { cur = t[1].trim(); parts[cur] = []; continue; }
+    if (cur) parts[cur].push(t);
+  }
+  const ps = parts.AcDbPlotSettings ?? [], lo = parts.AcDbLayout ?? [];
+  const get = (p: Tag[], c: number) => p.find(([k]) => k === c)?.[1]?.trim();
+  const n = (p: Tag[], c: number, d = 0) => num(get(p, c), d);
+  const name = decodeU(get(lo, 1) ?? '');
+  if (!name || /^model$/i.test(name)) return null;
+  const owner = [...lo].reverse().find(([k]) => k === 330)?.[1]?.trim().toUpperCase() ?? '';
+  const block = blockRecords.get(owner) ?? '*Paper_Space';
+  const rot = n(ps, 73);
+  let w = n(ps, 44), h = n(ps, 45);
+  // Margins of the unrotated sheet: left, bottom, right, top.
+  const m = [n(ps, 40), n(ps, 41), n(ps, 42), n(ps, 43)];
+  let margins: [number, number, number, number] = [m[0], m[1], m[2], m[3]];
+  if (rot === 1) margins = [m[3], m[0], m[1], m[2]];
+  else if (rot === 2) margins = [m[2], m[3], m[0], m[1]];
+  else if (rot === 3) margins = [m[1], m[2], m[3], m[0]];
+  if (rot === 1 || rot === 3) [w, h] = [h, w];
+  const paper: PaperSetup = { name: (get(ps, 4) ?? '').replace(/_/g, ' ') || 'Custom', w, h, margins };
+  if (!(w > 0 && h > 0)) {
+    // No plot settings: the limits are the sheet.
+    const lim0 = { x: n(lo, 10), y: n(lo, 20) }, lim1 = { x: n(lo, 11), y: n(lo, 21) };
+    if (lim1.x - lim0.x > 0 && lim1.y - lim0.y > 0) Object.assign(paper, { w: lim1.x - lim0.x, h: lim1.y - lim0.y, margins: [-lim0.x, -lim0.y, 0, 0] });
+    else Object.assign(paper, defaultPaper());
+  }
+  const plot: Record<string, number | string> = {};
+  for (const [c, v] of ps) if (!(c in plot)) plot[c] = v.trim();
+  return { name, order: n(lo, 71), block, paper, plot };
 }
 
 /**

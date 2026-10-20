@@ -3,14 +3,14 @@
 import {
   type Vec, type Box,
   add, sub, dist, mul, norm, dir, angleBetween, polar, rad, deg, normAng, boxFromPts, boxContainsBox, boxIntersects,
-  primIntersectsBox, distToPrim, fmtNum, mxTranslate, mxRotate, mxScale, mxMirror, eq,
+  primIntersectsBox, distToPrim, fmtNum, mxTranslate, mxRotate, mxScale, mxMirror, eq, boxValid,
 } from '../core/geom.ts';
 import {
-  type Entity, type NewEntity, type SnapKind,
+  type Entity, type NewEntity, type SnapKind, type ViewportEnt,
   entPrims, entHit, entGrips, entMoveGrip, entTransform,
 } from '../core/entities.ts';
-import { Drawing, type SpaceState } from '../core/document.ts';
-import { Viewport } from '../view/viewport.ts';
+import { Drawing, type SpaceState, type Layout } from '../core/document.ts';
+import { Viewport, vpModelView } from '../view/viewport.ts';
 import { Renderer, type OverlayState } from '../view/renderer.ts';
 import { findSnap, DEFAULT_SNAPS, type SnapHit } from './snap.ts';
 
@@ -90,6 +90,9 @@ export interface EditorUI {
   dimStyleManager(): void;
   quickSelect(): Promise<number[] | null>;
   about(): void;
+  /** Layout tabs or the model/paper state changed. */
+  onSpace(): void;
+  pageSetup(l: Layout): Promise<void>;
 }
 
 export interface Settings {
@@ -164,12 +167,19 @@ export class Editor {
 
   constructor(main: HTMLCanvasElement, overlay: HTMLCanvasElement) {
     this.renderer = new Renderer(main, overlay);
-    this.doc.on(() => { this.needsRender = true; this.renderer.glDirty = true; this.ui?.onDocChanged(); });
+    this.doc.on((kind) => {
+      this.needsRender = true;
+      this.renderer.glDirty = true;
+      // A new or loaded drawing starts on the Model tab.
+      if (kind === 'all' && this.activeVp !== null && this.doc.live !== 'model') this.activeVp = null;
+      if (kind === 'all' && !this.doc.layout) this.activeVp = null;
+      this.ui?.onDocChanged();
+    });
     const loop = () => {
       if (this.needsRender) {
         this.needsRender = false;
         this.renderer.grid = this.settings.grid;
-        this.renderer.render(this.doc, this.view, this.prompt?.kind === 'select' ? this.pending : this.selection);
+        this.renderer.render(this.doc, this.view, this.prompt?.kind === 'select' ? this.pending : this.selection, this.layoutView());
         this.needsOverlay = true;
       }
       if (this.needsOverlay) {
@@ -304,6 +314,224 @@ export class Editor {
   isSysvar?: (name: string) => boolean;
   /** Active block editor session. */
   blockEdit: { name: string; saved: SpaceState; viewState: { cx: number; cy: number; scale: number } } | null = null;
+
+  // -------------------------------------------------------------------------
+  // Layouts, paper space and viewports
+
+  /** Layout viewport whose model space is being edited (MSPACE), by entity id. */
+  activeVp: number | null = null;
+  /** Paper view of the current layout while a viewport is active. */
+  readonly paperView = new Viewport();
+  /** Model tab view while a layout is shown. */
+  private modelView: { cx: number; cy: number; scale: number } | null = null;
+
+  private layoutView(): { layout: Layout; paper: Viewport; activeVp: number | null } | undefined {
+    const l = this.doc.layout;
+    if (!l || this.blockEdit) return undefined;
+    if (this.activeVp === null) return { layout: l, paper: this.view, activeVp: null };
+    this.syncViewport();
+    return { layout: l, paper: this.paperView, activeVp: this.activeVp };
+  }
+
+  /** The active viewport (MSPACE), read from the layout's paper space. */
+  activeViewport(): ViewportEnt | null {
+    const l = this.doc.layout;
+    if (!l || this.activeVp === null) return null;
+    const e = this.doc.paperEntities(l).get(this.activeVp);
+    return e?.type === 'viewport' ? e : null;
+  }
+
+  /** Writes pan/zoom of the editor view back into the active viewport (or undoes it when locked). */
+  private syncViewport(): void {
+    const vp = this.activeViewport();
+    if (!vp) return;
+    this.paperView.resize(this.view.w, this.view.h);
+    if (vp.locked) { this.applyVp(vp); return; }
+    const S = this.paperView.toScreen(vp.c);
+    const vc = this.view.toWorld(S);
+    const vh = (vp.h * this.paperView.scale) / this.view.scale;
+    if (Math.abs(vh - vp.vh) > 1e-9 * vp.vh || dist(vc, vp.vc) > 1e-9 * vh) this.doc.setStored(this.doc.paperEntities(this.doc.layout!), { ...vp, vc, vh });
+  }
+
+  /** Sets the editor view to what a viewport shows. */
+  private applyVp(vp: ViewportEnt): void {
+    this.paperView.resize(this.view.w, this.view.h);
+    const mv = vpModelView(this.paperView, vp);
+    this.view.cx = mv.cx;
+    this.view.cy = mv.cy;
+    this.view.scale = mv.scale;
+  }
+
+  private snapView(): { cx: number; cy: number; scale: number } {
+    return { cx: this.view.cx, cy: this.view.cy, scale: this.view.scale };
+  }
+
+  /** Forgets tab views after a new or loaded drawing (which starts on the Model tab). */
+  resetSpaces(): void {
+    this.activeVp = null;
+    this.modelView = null;
+  }
+
+  /** Shows the Model tab (null) or a layout tab. */
+  setLayout(l: Layout | null): boolean {
+    const d = this.doc;
+    if (this.blockEdit) { this.print('Close the Block Editor first (BCLOSE).', 'error'); return false; }
+    if (l === d.layout) { if (l && this.activeVp !== null) this.exitViewport(); return true; }
+    if (this.activeVp !== null) this.exitViewport();
+    if (!d.layout) this.modelView = this.snapView();
+    else d.layout.view = this.snapView();
+    this.clearSelection();
+    this.win = null;
+    d.activate(l, l ? 'paper' : 'model');
+    if (l) {
+      if (!l.initialized) this.initLayout(l);
+      if (l.view) Object.assign(this.view, l.view);
+      else this.fitPaper(l);
+    } else if (this.modelView) Object.assign(this.view, this.modelView);
+    this.renderer.glDirty = true;
+    this.ui.onSpace();
+    this.ui.onStatus();
+    this.redraw();
+    return true;
+  }
+
+  fitPaper(l: Layout): void {
+    const P = l.paper, [ml, mb] = P.margins;
+    this.view.fit({ minX: -ml, minY: -mb, maxX: P.w - ml, maxY: P.h - mb }, 0.06);
+  }
+
+  /** First display of an empty layout: one viewport over the printable area showing the model extents. */
+  private initLayout(l: Layout): void {
+    l.initialized = true;
+    const paper = this.doc.paperEntities(l);
+    if (paper.size) return;
+    const P = l.paper, [ml, mb, mr, mt] = P.margins;
+    const pw = P.w - ml - mr, ph = P.h - mb - mt, inset = Math.min(pw, ph) * 0.03;
+    this.doc.loadInto(paper, this.newViewport({ x: inset, y: inset }, { x: pw - inset, y: ph - inset }));
+  }
+
+  /** Viewport over the box a–b that shows the model extents. */
+  newViewport(a: Vec, b: Vec): NewEntity {
+    const w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y);
+    const c = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const ext = this.doc.extents(this.doc.modelEntities);
+    let vc = c, vh = h;
+    if (boxValid(ext)) {
+      const bw = Math.max(ext.maxX - ext.minX, 1e-9), bh = Math.max(ext.maxY - ext.minY, 1e-9);
+      const k = Math.min(w / bw, h / bh) * 0.95;
+      vc = { x: (ext.minX + ext.maxX) / 2, y: (ext.minY + ext.maxY) / 2 };
+      vh = h / k;
+    }
+    return { type: 'viewport', c, w, h, vc, vh, layer: this.doc.currentLayer };
+  }
+
+  /** Viewport (on, in the current layout) under a screen point; the topmost one wins. */
+  viewportAt(s: Vec): ViewportEnt | null {
+    const l = this.doc.layout;
+    if (!l) return null;
+    const p = (this.activeVp !== null ? this.paperView : this.view).toWorld(s);
+    let hit: ViewportEnt | null = null;
+    for (const e of this.doc.paperEntities(l).values()) {
+      if (e.type === 'viewport' && !e.off && this.doc.isVisible(e) && Math.abs(p.x - e.c.x) <= e.w / 2 && Math.abs(p.y - e.c.y) <= e.h / 2) hit = e;
+    }
+    return hit;
+  }
+
+  /** MSPACE: edits model space through a viewport (switches viewports when one is active). */
+  enterViewport(id: number): boolean {
+    const d = this.doc, l = d.layout;
+    if (!l) return false;
+    const vp = d.paperEntities(l).get(id);
+    if (vp?.type !== 'viewport' || vp.off) return false;
+    this.win = null;
+    if (this.activeVp !== null) {
+      if (this.activeVp === id) return true;
+      this.syncViewport();
+      this.clearSelection();
+      this.activeVp = id;
+      this.applyVp(vp);
+      this.redraw();
+      return true;
+    }
+    l.view = this.snapView();
+    Object.assign(this.paperView, l.view);
+    this.clearSelection();
+    d.activate(l, 'model');
+    this.activeVp = id;
+    this.applyVp(vp);
+    this.ui.onStatus();
+    this.redraw();
+    return true;
+  }
+
+  /** PSPACE: back to editing the sheet. */
+  exitViewport(): void {
+    const l = this.doc.layout;
+    if (!l || this.activeVp === null) return;
+    this.syncViewport();
+    this.activeVp = null;
+    this.win = null;
+    this.clearSelection();
+    this.doc.activate(l, 'paper');
+    this.view.cx = this.paperView.cx;
+    this.view.cy = this.paperView.cy;
+    this.view.scale = this.paperView.scale;
+    this.ui.onStatus();
+    this.redraw();
+  }
+
+  /** Sets a viewport's scale (paper units per model unit), keeping its view center. */
+  setViewportScale(id: number, k: number): void {
+    const l = this.doc.layout;
+    if (!l || !(k > 0)) return;
+    const paper = this.doc.paperEntities(l);
+    const vp = paper.get(id);
+    if (vp?.type !== 'viewport') return;
+    const nv: ViewportEnt = { ...vp, vh: vp.h / k };
+    if (paper === this.doc.entities) {
+      const own = !this.doc.inTxn;
+      if (own) this.doc.begin('Viewport scale');
+      this.doc.update(nv);
+      if (own) this.doc.commit();
+    } else {
+      this.doc.setStored(paper, nv);
+      if (id === this.activeVp) this.applyVp(nv);
+    }
+    this.ui.onStatus();
+    this.redraw();
+  }
+
+  /** Viewport whose scale the status bar shows: the active one, or a single selected one. */
+  scaleViewport(): ViewportEnt | null {
+    const a = this.activeViewport();
+    if (a) return a;
+    if (!this.doc.layout || this.selection.size !== 1) return null;
+    const e = this.doc.get([...this.selection][0]);
+    return e?.type === 'viewport' ? e : null;
+  }
+
+  /** Zooms to a box; inside an active viewport the box fills the viewport. */
+  fitView(b: Box, margin = 0.05): void {
+    const vp = this.activeViewport();
+    if (!vp) { this.view.fit(b, margin); return; }
+    if (vp.locked) { this.print('The viewport display is locked.'); return; }
+    if (!boxValid(b)) return;
+    const bw = Math.max(b.maxX - b.minX, 1e-9), bh = Math.max(b.maxY - b.minY, 1e-9);
+    const k = Math.min(vp.w / bw, vp.h / bh) * (1 - margin * 2);
+    const nv: ViewportEnt = { ...vp, vc: { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 }, vh: vp.h / k };
+    this.doc.setStored(this.doc.paperEntities(this.doc.layout!), nv);
+    this.applyVp(nv);
+  }
+
+  /** View that wheel/pan act on: the sheet when the active viewport is locked. */
+  private navView(): Viewport {
+    return this.activeViewport()?.locked ? this.paperView : this.view;
+  }
+
+  private afterNav(): void {
+    const vp = this.activeViewport();
+    if (vp?.locked) this.applyVp(vp);
+  }
 
   /** Runs "CMD;input;input…" — the command followed by pre-answered prompts. */
   async runMacro(macro: string): Promise<void> {
@@ -798,7 +1026,8 @@ export class Editor {
 
   onMouseMove(s: Vec, buttons: number): void {
     if (this.panning) {
-      this.view.panPixels(s.x - this.panning.x, s.y - this.panning.y);
+      this.navView().panPixels(s.x - this.panning.x, s.y - this.panning.y);
+      this.afterNav();
       this.panning = { x: s.x, y: s.y };
       this.redraw();
     }
@@ -828,6 +1057,14 @@ export class Editor {
     }
     if (button === 2) return;
     if (this.panTool) { this.panning = { x: s.x, y: s.y }; return; }
+    // In MSPACE only the active viewport takes picks; clicking another one activates it.
+    if (this.activeVp !== null) {
+      const vp = this.viewportAt(s);
+      if (vp?.id !== this.activeVp) {
+        if (vp && !this.prompt) this.enterViewport(vp.id);
+        return;
+      }
+    }
     s = this.snapScreen(s);
     this.updateCursor();
     const p = this.prompt;
@@ -889,7 +1126,8 @@ export class Editor {
   lastWindow: Box | null = null;
 
   onWheel(s: Vec, deltaY: number): void {
-    this.view.zoomAt(s, deltaY < 0 ? 1.25 : 0.8);
+    this.navView().zoomAt(s, deltaY < 0 ? 1.25 : 0.8);
+    this.afterNav();
     this.redraw();
     this.cursorScreen = s;
     this.updateCursor();
@@ -897,6 +1135,17 @@ export class Editor {
 
   onDoubleClick(s: Vec): void {
     if (this.prompt) return;
+    if (this.doc.layout) {
+      const vp = this.viewportAt(s);
+      if (this.activeVp !== null) {
+        // Outside the active viewport: back to paper space (or into another viewport).
+        if (!vp) { this.exitViewport(); return; }
+        if (vp.id !== this.activeVp) { this.enterViewport(vp.id); return; }
+      } else if (vp) {
+        const hit = this.pickAt(s);
+        if (hit === null || hit === vp.id) { this.enterViewport(vp.id); return; }
+      }
+    }
     const id = this.pickAt(s);
     if (id === null) return;
     const e = this.doc.get(id)!;
@@ -1059,7 +1308,9 @@ export class Editor {
   async zoomExtents(): Promise<void> {
     this.view.pushHistory();
     const b = this.doc.extents();
-    if (b.minX <= b.maxX) this.view.fit(b);
+    if (this.activeVp !== null) this.fitView(b);
+    else if (b.minX <= b.maxX) this.view.fit(b);
+    else if (this.doc.layout) this.fitPaper(this.doc.layout);
     else this.view.fit({ minX: 0, minY: 0, maxX: 420, maxY: 297 });
     this.redraw();
   }

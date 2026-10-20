@@ -6,6 +6,7 @@ import * as M from './modify.ts';
 import * as A from './annotate.ts';
 import * as U from './misc.ts';
 import * as X from './extra.ts';
+import * as LO from './layout.ts';
 
 const defs: CommandDef[] = [
   // Draw
@@ -97,6 +98,12 @@ const defs: CommandDef[] = [
   { name: 'PASTEORIG', desc: 'Clipboard: paste to original coordinates', fn: X.PASTEORIG, noRepeat: true },
   { name: 'PASTEBLOCK', desc: 'Clipboard: paste as block', fn: X.PASTEBLOCK, noRepeat: true },
   { name: 'DRAWORDER', aliases: ['DR'], desc: 'Modify: change draw order', fn: X.DRAWORDER },
+  // Layouts
+  { name: 'LAYOUT', aliases: ['LO', '-LAYOUT'], desc: 'Layout: create, copy, delete, rename or set layouts', fn: LO.LAYOUT, noUndo: true, noRepeat: true },
+  { name: 'MVIEW', aliases: ['MV', 'VPORTS'], desc: 'Layout: create and control layout viewports', fn: LO.MVIEW },
+  { name: 'MSPACE', aliases: ['MS'], desc: 'Layout: edit model space inside a viewport', fn: LO.MSPACE, noUndo: true, noRepeat: true },
+  { name: 'PSPACE', aliases: ['PS'], desc: 'Layout: edit paper space', fn: LO.PSPACE, noUndo: true, noRepeat: true },
+  { name: 'PAGESETUP', desc: 'Layout: paper size and margins', fn: LO.PAGESETUP, noUndo: true, noRepeat: true },
   // File
   { name: 'NEW', desc: 'File: new drawing', fn: U.NEW, noUndo: true, noRepeat: true },
   { name: 'OPEN', desc: 'File: open DXF/DWG', fn: U.OPEN, noUndo: true, noRepeat: true },

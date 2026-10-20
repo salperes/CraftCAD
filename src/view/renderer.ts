@@ -8,12 +8,12 @@ import {
 import {
   type Entity, type TextEnt, type MTextEnt, type HatchEnt, type DimEnt, type InsertEnt, type PatLine, type SnapKind,
   TEXT_FONT, textLocalBox, mtextLocalBox, dimGeometry, flattenSpline, forEachInsertInstance, inheritFromInsert,
-  decodeSpecialChars, textUnitWidth, arrowPts, BYBLOCK,
+  decodeSpecialChars, textUnitWidth, arrowPts, BYBLOCK, vpCorners,
 } from '../core/entities.ts';
-import type { Drawing } from '../core/document.ts';
+import type { Drawing, Layout } from '../core/document.ts';
 import { aciToCss, trueColorCss } from '../core/aci.ts';
 import { patternLines } from '../core/patterns.ts';
-import type { Viewport } from './viewport.ts';
+import { type Viewport, vpModelView } from './viewport.ts';
 import { GLLayer, GL_TYPES } from './glrenderer.ts';
 
 export const THEME = {
@@ -34,7 +34,21 @@ export const THEME = {
   crossFill: 'rgba(40,200,80,0.16)',
   crossStroke: '#4fd36a',
   tracking: 'rgba(120,255,120,0.85)',
+  layoutBg: '#3b4048',
+  paper: '#ffffff',
+  paperShadow: 'rgba(0,0,0,0.45)',
+  printable: 'rgba(80,90,105,0.75)',
+  activeViewport: '#2f7cf6',
 };
+
+/** What the main scene shows when a layout tab is active. */
+export interface LayoutView {
+  layout: Layout;
+  /** Paper space view (equals the editor view unless a viewport is active). */
+  paper: Viewport;
+  /** Viewport whose model space is being edited (MSPACE), if any. */
+  activeVp: number | null;
+}
 
 type Inherit = Pick<Entity, 'layer' | 'color' | 'trueColor' | 'ltype'>;
 
@@ -162,13 +176,17 @@ export class Renderer {
     return c;
   }
 
+  private glBuilt: { ents: Map<number, Entity> | null; dark: boolean; mono: boolean } = { ents: null, dark: true, mono: false };
+
   /** Rebuilds GL buffers if the drawing changed or the zoom moved far from the tessellation scale. */
-  private updateGL(doc: Drawing, v: Viewport): void {
+  private updateGL(doc: Drawing, ents: Map<number, Entity>, scale: number): void {
     const gl = this.gl!;
-    const ratio = gl.builtScale ? v.scale / gl.builtScale : 0;
-    if (this.glDirty || ratio > 4 || ratio < 0.25) {
+    const ratio = gl.builtScale ? scale / gl.builtScale : 0;
+    const b = this.glBuilt;
+    if (this.glDirty || ratio > 4 || ratio < 0.25 || b.ents !== ents || b.dark !== this.darkBg || b.mono !== this.mono) {
       this.ltCache.clear();
-      gl.build(doc, v.scale, {
+      this.glBuilt = { ents, dark: this.darkBg, mono: this.mono };
+      gl.build(doc, ents, scale, {
         color: (e, inh) => {
           const src = inh ? inheritFromInsert(e, inh) : e;
           if (inh && !doc.isVisible(src)) return null;
@@ -178,28 +196,138 @@ export class Renderer {
       });
       this.glDirty = false;
     }
-    gl.draw(v);
   }
 
   // -------------------------------------------------------------------------
   // Main scene
 
-  render(doc: Drawing, v: Viewport, selection: Set<number>): void {
+  render(doc: Drawing, v: Viewport, selection: Set<number>, lv?: LayoutView): void {
     const t0 = performance.now();
+    if (lv) {
+      const dark = this.darkBg;
+      this.darkBg = false; // color 7 is black on the sheet
+      try {
+        this.stats = { drawn: this.renderLayout(doc, v, selection, lv), ms: 0 };
+      } finally {
+        this.darkBg = dark;
+      }
+      this.stats.ms = performance.now() - t0;
+      return;
+    }
     const ctx = this.mctx;
     this.setScreen(ctx);
     ctx.fillStyle = this.bg;
     ctx.fillRect(0, 0, v.w, v.h);
     if (this.grid) this.drawGrid(ctx, v);
+    this.styleCache.clear();
+    const useGL = !!this.gl;
+    if (useGL) { this.updateGL(doc, doc.entities, v.scale); this.gl!.draw(v); }
+    const drawn = this.drawScene(ctx, doc, doc.entities, v, useGL);
+    this.drawSelection(doc, v, selection, null);
+    this.stats = { drawn, ms: performance.now() - t0 };
+  }
+
+  /** Paper sheet, viewports showing model space, then paper space entities. */
+  private renderLayout(doc: Drawing, v: Viewport, selection: Set<number>, lv: LayoutView): number {
+    const ctx = this.mctx;
+    const pv = lv.paper;
+    const P = lv.layout.paper, [ml, mb, mr, mt] = P.margins;
+    this.setScreen(ctx);
+    ctx.fillStyle = this.plotting ? '#ffffff' : THEME.layoutBg;
+    ctx.fillRect(0, 0, v.w, v.h);
+    const a = pv.toScreen({ x: -ml, y: -mb }), b = pv.toScreen({ x: P.w - ml, y: P.h - mb });
+    if (!this.plotting) {
+      ctx.fillStyle = THEME.paperShadow;
+      ctx.fillRect(a.x + 5, b.y + 5, b.x - a.x, a.y - b.y);
+      ctx.fillStyle = THEME.paper;
+      ctx.fillRect(a.x, b.y, b.x - a.x, a.y - b.y);
+      const c = pv.toScreen({ x: 0, y: 0 }), d = pv.toScreen({ x: P.w - ml - mr, y: P.h - mb - mt });
+      ctx.strokeStyle = THEME.printable;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([5, 4]);
+      ctx.strokeRect(Math.round(c.x) + 0.5, Math.round(d.y) + 0.5, Math.round(d.x - c.x), Math.round(c.y - d.y));
+      ctx.setLineDash([]);
+    }
+    this.styleCache.clear();
+    const model = doc.modelEntities;
+    const paper = doc.paperEntities(lv.layout);
+    const vps: { e: Entity & { type: 'viewport' }; mv: Viewport; clip: { x: number; y: number; w: number; h: number } }[] = [];
+    for (const e of paper.values()) {
+      if (e.type !== 'viewport' || e.off || !doc.isVisible(e)) continue;
+      const k = vpCorners(e).map((p) => pv.toScreen(p));
+      const x0 = Math.max(0, Math.min(k[0].x, k[2].x)), x1 = Math.min(v.w, Math.max(k[0].x, k[2].x));
+      const y0 = Math.max(0, Math.min(k[0].y, k[2].y)), y1 = Math.min(v.h, Math.max(k[0].y, k[2].y));
+      if (x1 - x0 < 1 || y1 - y0 < 1) continue;
+      vps.push({ e, mv: vpModelView(pv, e), clip: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } });
+    }
+    const useGL = !!this.gl && !this.plotting;
+    if (useGL) {
+      this.gl!.clear();
+      if (vps.length) {
+        this.updateGL(doc, model, Math.max(...vps.map((x) => x.mv.scale)));
+        for (const x of vps) this.gl!.drawClip(x.mv, x.clip);
+      }
+    }
+    let drawn = 0;
+    for (const x of vps) {
+      ctx.save();
+      this.setScreen(ctx);
+      ctx.beginPath();
+      ctx.rect(x.clip.x, x.clip.y, x.clip.w, x.clip.h);
+      ctx.clip();
+      drawn += this.drawScene(ctx, doc, model, x.mv, useGL);
+      ctx.restore();
+    }
+    drawn += this.drawScene(ctx, doc, paper, pv, false);
+    const act = lv.activeVp !== null ? paper.get(lv.activeVp) : undefined;
+    let selView = pv, selClip: { x: number; y: number; w: number; h: number } | null = null;
+    if (act?.type === 'viewport') {
+      const k = vpCorners(act).map((p) => pv.toScreen(p));
+      this.setScreen(ctx);
+      ctx.strokeStyle = THEME.activeViewport;
+      ctx.lineWidth = 3;
+      ctx.strokeRect(k[0].x, k[2].y, k[2].x - k[0].x, k[0].y - k[2].y);
+      const x = vps.find((q) => q.e.id === act.id);
+      if (x) { selView = x.mv; selClip = x.clip; }
+    }
+    this.drawSelection(doc, selView, selection, selClip, v);
+    return drawn;
+  }
+
+  /** Selection highlight (on its own canvas above the GL lines when GL is on). */
+  private drawSelection(doc: Drawing, v: Viewport, selection: Set<number>, clip: { x: number; y: number; w: number; h: number } | null, screen: Viewport = v): void {
+    let sctx = this.mctx;
+    if (this.gl && this.sel && !this.plotting) {
+      sctx = this.sel.getContext('2d')!;
+      this.setScreen(sctx);
+      sctx.clearRect(0, 0, screen.w, screen.h);
+    }
+    if (!selection.size) return;
+    sctx.save();
+    if (clip) { this.setScreen(sctx); sctx.beginPath(); sctx.rect(clip.x, clip.y, clip.w, clip.h); sctx.clip(); }
+    this.setWorld(sctx, v);
+    sctx.lineCap = 'round';
+    sctx.lineJoin = 'round';
+    const px = v.px(1);
+    for (const id of selection) {
+      const e = doc.get(id);
+      if (!e || !doc.isVisible(e)) continue;
+      this.drawEntity(sctx, e, doc, { px, widthPx: 2.2, depth: 0, override: THEME.selection, noDash: true });
+    }
+    sctx.restore();
+  }
+
+  /** True while plotting: no sheet decorations, no GL layer. */
+  private plotting = false;
+
+  /** Draws a set of entities in world coordinates of v; returns how many were visible. */
+  private drawScene(ctx: CanvasRenderingContext2D, doc: Drawing, ents: Map<number, Entity>, v: Viewport, useGL: boolean): number {
     this.setWorld(ctx, v);
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     const vis = v.visibleBox(2);
     const px = v.px(1);
     let drawn = 0;
-    this.styleCache.clear();
-    const useGL = !!this.gl;
-    if (useGL) this.updateGL(doc, v);
     this.ltCache.clear();
     const st: DrawState = { px, widthPx: this.baseWidth, depth: 0, skipGL: useGL };
     // Consecutive simple curves with the same resolved style share one path and one stroke.
@@ -207,7 +335,7 @@ export class Renderer {
     const flush = () => {
       if (batch !== null) { ctx.stroke(); batch = null; }
     };
-    for (const e of doc.entities.values()) {
+    for (const e of ents.values()) {
       if (!doc.isVisible(e)) continue;
       const b = doc.box(e);
       if (boxValid(b) && !boxIntersects(b, vis)) continue;
@@ -240,24 +368,7 @@ export class Renderer {
       this.drawEntity(ctx, e, doc, st);
     }
     flush();
-    // With GL the highlight goes on its own canvas above the GL lines.
-    let sctx = ctx;
-    if (useGL && this.sel) {
-      sctx = this.sel.getContext('2d')!;
-      this.setScreen(sctx);
-      sctx.clearRect(0, 0, v.w, v.h);
-      this.setWorld(sctx, v);
-      sctx.lineCap = 'round';
-      sctx.lineJoin = 'round';
-    }
-    if (selection.size) {
-      for (const id of selection) {
-        const e = doc.get(id);
-        if (!e || !doc.isVisible(e)) continue;
-        this.drawEntity(sctx, e, doc, { px, widthPx: 2.2, depth: 0, override: THEME.selection, noDash: true });
-      }
-    }
-    this.stats = { drawn, ms: performance.now() - t0 };
+    return drawn;
   }
 
   private drawGrid(ctx: CanvasRenderingContext2D, v: Viewport): void {
@@ -460,6 +571,15 @@ export class Renderer {
       case 'hatch': this.drawHatch(ctx, e, doc, st); break;
       case 'dimension': this.drawDimension(ctx, e, doc, st); break;
       case 'insert': this.drawInsert(ctx, e, doc, st); break;
+      case 'viewport': {
+        const k = vpCorners(e);
+        ctx.beginPath();
+        ctx.moveTo(k[0].x, k[0].y);
+        for (let i = 1; i < 4; i++) ctx.lineTo(k[i].x, k[i].y);
+        ctx.closePath();
+        ctx.stroke();
+        break;
+      }
     }
   }
 
@@ -654,9 +774,10 @@ export class Renderer {
   }
 
   /** Renders the drawing into an off-screen canvas for plotting. */
-  plotTo(canvas: HTMLCanvasElement, doc: Drawing, v: Viewport, o: { mono: boolean; lineWidthPx: number }): void {
-    const saved = { mctx: this.mctx, dpr: this.dpr, bg: this.bg, darkBg: this.darkBg, mono: this.mono, grid: this.grid, baseWidth: this.baseWidth, gl: this.gl };
+  plotTo(canvas: HTMLCanvasElement, doc: Drawing, v: Viewport, o: { mono: boolean; lineWidthPx: number }, layout?: Layout): void {
+    const saved = { mctx: this.mctx, dpr: this.dpr, bg: this.bg, darkBg: this.darkBg, mono: this.mono, grid: this.grid, baseWidth: this.baseWidth, gl: this.gl, plotting: this.plotting };
     this.gl = null;
+    this.plotting = true;
     this.mctx = canvas.getContext('2d', { alpha: false })!;
     this.dpr = 1;
     this.bg = '#ffffff';
@@ -665,7 +786,7 @@ export class Renderer {
     this.grid = false;
     this.baseWidth = o.lineWidthPx;
     try {
-      this.render(doc, v, new Set());
+      this.render(doc, v, new Set(), layout ? { layout, paper: v, activeVp: null } : undefined);
     } finally {
       Object.assign(this, saved);
     }
