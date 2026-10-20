@@ -183,6 +183,22 @@ const w = window as unknown as {
   showOpenFilePicker?: (o: unknown) => Promise<(FileHandle & { getFile(): Promise<File> })[]>;
   showSaveFilePicker?: (o: unknown) => Promise<FileHandle>;
 };
+/** Electron bridge (electron/preload.cjs); undefined in the browser. */
+const desktop = window.craftcadDesktop;
+
+/** File handle that writes to a native path through the Electron bridge. */
+function desktopHandle(path: string): FileHandle {
+  return {
+    name: path.split(/[\\/]/).pop() ?? path,
+    createWritable: async () => {
+      let data: Uint8Array = new Uint8Array();
+      return {
+        write: async (d: string | Blob) => { data = typeof d === 'string' ? new TextEncoder().encode(d) : new Uint8Array(await d.arrayBuffer()); },
+        close: async () => { await desktop!.writeFile(path, data); },
+      };
+    },
+  };
+}
 
 function inBlockEditor(): boolean {
   if (!ed.blockEdit) return false;
@@ -221,6 +237,11 @@ async function loadFile(file: File, handle: FileHandle | null): Promise<void> {
 
 async function openDialog(): Promise<void> {
   if (inBlockEditor() || !(await confirmDiscard())) return;
+  if (desktop) {
+    const r = await desktop.openDialog();
+    if (r) await loadFile(new File([r.bytes as BlobPart], r.name), desktopHandle(r.path));
+    return;
+  }
   if (w.showOpenFilePicker) {
     try {
       const [hd] = await w.showOpenFilePicker({ types: [{ description: 'Drawings', accept: { 'application/dxf': ['.dxf', '.dwg'] } }] });
@@ -245,7 +266,7 @@ async function saveFile(saveAs: boolean): Promise<void> {
   // QSAVE writes silently only to a file handle in the same format; otherwise ask like AutoCAD.
   const silent = !saveAs && fileHandle && fileHandle.name.toLowerCase().endsWith('.' + f.ext);
   if (!silent) {
-    const r = await saveAsDialog(name, f, st);
+    const r = await saveAsDialog(name, f, st, desktop ? installBundledOda : undefined);
     if (!r) return;
     name = r.name;
     f = r.fmt;
@@ -263,6 +284,15 @@ async function saveFile(saveAs: boolean): Promise<void> {
       const wr = await fileHandle.createWritable();
       await wr.write(blob);
       await wr.close();
+    } else if (desktop) {
+      const path = await desktop.saveDialog(name, f.ext, f.label);
+      if (!path) return;
+      const hd = desktopHandle(path);
+      const wr = await hd.createWritable();
+      await wr.write(blob);
+      await wr.close();
+      fileHandle = hd;
+      name = hd.name;
     } else if (w.showSaveFilePicker) {
       const hd = await w.showSaveFilePicker({ suggestedName: name, types: [{ description: f.label, accept: { 'application/octet-stream': ['.' + f.ext] } }] });
       const wr = await hd.createWritable();
@@ -285,6 +315,26 @@ async function saveFile(saveAs: boolean): Promise<void> {
   }
   renderTabs();
 }
+
+/** Desktop: runs the ODA File Converter installer shipped with CraftCAD. */
+async function installBundledOda(): Promise<boolean> {
+  if (!desktop) return false;
+  const b = await desktop.odaBundled();
+  if (!b.installer) { cmdline.print('No bundled ODA File Converter installer in this build.', 'error'); return false; }
+  cmdline.print('Starting the ODA File Converter installer…', 'info');
+  const r = await desktop.installOda();
+  cmdline.print(r.message, r.ok ? 'info' : 'error');
+  await converterStatus(true);
+  return r.ok;
+}
+
+// Desktop: drawings opened from the command line / a second launch.
+desktop?.onOpenFile((f) => {
+  void (async () => {
+    if (inBlockEditor() || !(await confirmDiscard())) return;
+    await loadFile(new File([f.bytes as BlobPart], f.name), desktopHandle(f.path));
+  })();
+});
 
 let untitled = 1;
 async function newDrawing(): Promise<void> {

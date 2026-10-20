@@ -2,7 +2,7 @@
 
 Web-based 2D CAD with AutoCAD-style commands, DXF read/write and DWG read/write (via a local converter).
 
-**Mevcut Versiyon:** 0.3.1 (Rev. ID 9)
+**Mevcut Versiyon:** 0.4.0 (Rev. ID 10)
 
 ## Versioning and changelog
 
@@ -20,6 +20,8 @@ npm run dev      # dev server + DWG conversion API
 npm run build    # typecheck + production build to dist/
 npm run serve    # dist/ + conversion API on http://localhost:8080
 npm test         # Node unit + DXF round-trip tests
+npm run electron # build + run the desktop app (unset ELECTRON_RUN_AS_NODE when launched from VS Code)
+npm run dist:win # Windows installer (NSIS) in release/
 ```
 
 UI checks: `test/ui-shot.mjs`, `test/perf.mjs`, `test/otrack.mjs`, `test/dwgsave.mjs` drive the running dev server with Playwright (headless Chromium). `test/acad-check.ps1` validates DXF/DWG output with AutoCAD Core Console when installed.
@@ -32,5 +34,6 @@ UI checks: `test/ui-shot.mjs`, `test/perf.mjs`, `test/otrack.mjs`, `test/dwgsave
 - `src/view/` Canvas 2D renderer and WebGL layer
 - `src/ui/` ribbon, command line, dialogs, palettes, contextual tabs
 - `server/` local DWG conversion (ODA File Converter / AutoCAD Core Console) and production server
+- `electron/` desktop app main process and preload bridge; `vendor/oda/` ODA installers (git-ignored, bundled into the installer)
 
 `test/fixtures/` holds local sample drawings (Autodesk samples, user files) and is git-ignored.

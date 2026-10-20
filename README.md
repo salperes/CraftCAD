@@ -66,6 +66,23 @@ onu yakalar (`+`). İmleç yakalanan noktanın yatay/dikey hizasına gelince kes
 kilitlenir; iki hizanın ya da hizanın polar izleme çizgisiyle kesişimine snap yapılır. İz çizgisi
 üzerindeyken sayı yazmak o mesafeyi yakalanan noktadan uygular. Aynı noktada tekrar beklemek onu bırakır.
 
+## Masaüstü uygulaması (Electron)
+
+```bash
+npm run electron   # derleyip masaüstü uygulamasını çalıştırır
+npm run dist:win   # Windows kurulum paketi: release/CraftCAD Setup <sürüm>.exe
+```
+
+Masaüstü sürümünde yerel Aç/Kaydet pencereleri vardır; açılan DWG/DXF Ctrl+S ile aynı dosyaya
+kaydedilir. Dosya yolu komut satırından verilebilir (`CraftCAD.exe çizim.dwg`) ve uygulama tek
+örnek çalışır. Kaydedilmemiş değişiklik varsa kapatırken sorar.
+
+ODA File Converter kurulum paketleri `vendor/oda/` klasörüne konur (Windows `.msi`, macOS `.dmg`)
+ve kurulum paketine eklenir. ODA kurulu değilse Save As penceresinde "Install bundled ODA File
+Converter…" düğmesi çıkar. `vendor/` klasörü ODA lisansı nedeniyle git'e eklenmez; paketi
+başkalarına dağıtmadan önce ODA lisans koşullarını kontrol edin. Kurulum dosyası imzasız olduğu
+için Windows SmartScreen ilk açılışta uyarı gösterebilir.
+
 ## DWG kaydetme
 
 DWG, bilgisayardaki bir dönüştürücüyle yazılır. CraftCAD kendi R2000 DXF'ini üretir; yerel sunucu

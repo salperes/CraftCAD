@@ -5,3 +5,5 @@ dist/
 Thumbs.db
 test/fixtures/
 test/out/
+vendor/
+release/

@@ -1,4 +1,20 @@
 ---------------------------------------------------------
+Rev. ID    : 10
+Version    : 0.4.0
+Rev. Date  : 20.10.2026
+Rev. Time  : 07:03:06
+Rev. Prompt: ODA converter paketlerini proje klasörüne çek; uygulamayı Electron paketi haline getir
+
+Rev. Report: (
+- Desktop: Electron 44 uygulaması (electron/main.mjs) — iç sunucu rastgele localhost portunda, varsayılan menü yok (F11 = OTRACK)
+- Desktop: Yerel Aç/Kaydet pencereleri, açılan DWG/DXF'e Ctrl+S ile yerinde kaydetme, komut satırından dosya açma, tek örnek
+- Desktop: Paketle gelen ODA File Converter kurulumu (Save As penceresinden), kapatırken kaydedilmemiş değişiklik uyarısı
+- Build: electron-builder NSIS kurulum paketi (npm run dist:win), uygulama ikonu (build/icon.png)
+- Vendor: ODA File Converter 27.9 MSI/DMG vendor/oda altında (lisans nedeniyle git dışında)
+- Client: MULTILEADER artık leader polyline + ok başı + MTEXT olarak okunuyor (önceden yalnızca metin alınıyordu)
+- Server: serve.mjs startServer() olarak yeniden kullanılabilir
+)
+---------------------------------------------------------
 Rev. ID    : 9
 Version    : 0.3.1
 Rev. Date  : 20.10.2026

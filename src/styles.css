@@ -330,3 +330,4 @@ legend { padding: 0 4px; color: var(--text-dim); }
 .news-prompt { margin: 3px 0 4px; color: var(--text); }
 .news-entry ul { margin: 0; padding-left: 18px; color: #c4ccd6; }
 .news-entry li { margin: 1px 0; }
+.saveas-install { margin-top: 10px; }

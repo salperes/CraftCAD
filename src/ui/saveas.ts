@@ -1,9 +1,9 @@
 // "Save Drawing As" dialog: file name and file type (DWG versions need the local converter).
 
-import { SAVE_FORMATS, type SaveFormat, type ConverterStatus } from '../io/convert.ts';
+import { SAVE_FORMATS, converterStatus, type SaveFormat, type ConverterStatus } from '../io/convert.ts';
 import { h } from './dom.ts';
 
-export function saveAsDialog(name: string, current: SaveFormat, st: ConverterStatus): Promise<{ name: string; fmt: SaveFormat } | null> {
+export function saveAsDialog(name: string, current: SaveFormat, st: ConverterStatus, installOda?: () => Promise<boolean>): Promise<{ name: string; fmt: SaveFormat } | null> {
   return new Promise((resolve) => {
     const back = h('div', { class: 'modal-back' });
     const win = h('div', { class: 'modal saveas-dlg' });
@@ -36,10 +36,26 @@ export function saveAsDialog(name: string, current: SaveFormat, st: ConverterSta
     type.addEventListener('change', sync);
     sync();
     if (!st.available) note.classList.add('warn');
+    // Desktop build: offer the bundled ODA installer, then re-open the dialog with DWG enabled.
+    let installRow: HTMLElement | null = null;
+    if (!st.available && installOda) {
+      const btn = h('button', { class: 'btn' }, 'Install bundled ODA File Converter…');
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        btn.textContent = 'Installing…';
+        const ok = await installOda();
+        if (ok) {
+          back.remove();
+          resolve(await saveAsDialog(name, current, await converterStatus(true), installOda));
+        } else { btn.disabled = false; btn.textContent = 'Install bundled ODA File Converter…'; }
+      });
+      installRow = h('div', { class: 'saveas-install' }, btn);
+    }
     body.append(
       h('div', { class: 'form-grid-row' }, h('span', {}, 'File name'), h('div', { class: 'saveas-name' }, nameIn, ext)),
       h('div', { class: 'form-grid-row' }, h('span', {}, 'Files of type'), type),
       note,
+      ...(installRow ? [installRow] : []),
     );
     const ok = h('button', { class: 'btn primary' }, 'Save');
     const cancel = h('button', { class: 'btn' }, 'Cancel');

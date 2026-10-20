@@ -1,6 +1,6 @@
 {
   "name": "craftcad",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Lightweight web-based 2D CAD with AutoCAD-style commands, DXF and DWG support",
   "license": "GPL-3.0-or-later",
   "private": true,
@@ -11,13 +11,73 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --no-warnings test/run.ts",
-    "serve": "node server/serve.mjs"
-  },
-  "dependencies": {
-    "@mlightcad/libredwg-web": "0.7.14"
+    "serve": "node server/serve.mjs",
+    "electron": "npm run build && node scripts/run-electron.mjs",
+    "dist:win": "npm run build && electron-builder --win nsis",
+    "dist:dir": "npm run build && electron-builder --win dir"
   },
   "devDependencies": {
+    "electron": "^44.5.1",
+    "electron-builder": "^26.17.0",
     "typescript": "6.0.3",
-    "vite": "8.3.2"
+    "vite": "8.3.2",
+    "@mlightcad/libredwg-web": "0.7.14"
+  },
+  "main": "electron/main.mjs",
+  "productName": "CraftCAD",
+  "author": "salperes",
+  "build": {
+    "appId": "com.salperes.craftcad",
+    "productName": "CraftCAD",
+    "copyright": "GPL-3.0-or-later",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**",
+      "electron/**",
+      "server/**",
+      "package.json",
+      "!**/*.map"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.png",
+      "extraResources": [
+        {
+          "from": "vendor/oda",
+          "to": "oda",
+          "filter": [
+            "*.msi"
+          ]
+        }
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "icon": "build/icon.png",
+      "extraResources": [
+        {
+          "from": "vendor/oda",
+          "to": "oda",
+          "filter": [
+            "*.dmg"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "CraftCAD"
+    }
   }
 }

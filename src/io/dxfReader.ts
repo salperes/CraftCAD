@@ -120,6 +120,7 @@ export function readDxf(input: Uint8Array | string): DxfData {
     version: 'AC1009', entities: [], layers: [], linetypes: [], blocks: [], header: {}, dimStyle: defaultDimStyle(), warnings: [],
   };
   const skipped = new Map<string, number>();
+  let mleaders = 0;
 
   let i = 0;
   const nextRec = (): Rec | null => {
@@ -224,6 +225,7 @@ export function readDxf(input: Uint8Array | string): DxfData {
         continue;
       }
       if (rv.num(67) !== 1 && rv.num(60) !== 1) {
+        if (rec.type === 'MULTILEADER' || rec.type === 'MLEADER') mleaders++;
         const out = convEntity(rv);
         if (out === undefined) skipped.set(rec.type, (skipped.get(rec.type) ?? 0) + 1);
         else pushAll(sink, out);
@@ -263,6 +265,7 @@ export function readDxf(input: Uint8Array | string): DxfData {
       while (r && r.type !== 'ENDSEC') r = nextRec();
     }
   }
+  if (mleaders) data.warnings.push(`${mleaders} × MULTILEADER imported as leader polylines, arrowheads and MTEXT (saved that way too)`);
   for (const [t, n] of skipped) data.warnings.push(`${n} × ${t} not supported (skipped)`);
   // LibreDWG sometimes writes every layer with a negative (off) color; a drawing with
   // all layers off is almost certainly that, so show them.
@@ -402,15 +405,77 @@ function convEntity(rv: RecView): NewEntity | NewEntity[] | null | undefined {
       if (!name) return null;
       return { type: 'insert', name, p: { x: 0, y: 0 }, sx: 1, sy: 1, rot: 0, attribs: [], ...cm, tableBlock: true } as NewEntity;
     }
-    case 'MULTILEADER': case 'MLEADER': {
-      const txt = rv.str(304);
-      if (!txt) return null;
-      const p = rv.pt(12);
-      return { type: 'mtext', p, h: rv.num(41, 2.5) || 2.5, text: txt, rot: 0, width: 0, attach: 1, ...cm };
-    }
+    case 'MULTILEADER': case 'MLEADER': return convMLeader(rv, cm);
     case 'VIEWPORT': case 'SEQEND': case 'ATTRIB': case 'VERTEX': return null;
     default: return undefined;
   }
+}
+
+/**
+ * MULTILEADER → leader polylines + arrowhead solids + MTEXT, so the drawing keeps its
+ * appearance (R2000 DXF has no MLEADER object type).
+ */
+function convMLeader(rv: RecView, cm: ReturnType<typeof common>): NewEntity[] | null {
+  const tags = rv.r.tags;
+  const out: NewEntity[] = [];
+  let inCtx = false, inLeader = false, inLine = false;
+  let text = '', textPos: Vec | null = null, textH = 2.5, textW = 0, attach = 1, arrow = 2.5, scale = 1;
+  let textDir: Vec | null = null;
+  let line: Vec[] = [];
+  const leaders: { last: Vec | null; dog: Vec; dogLen: number; lines: Vec[][] }[] = [];
+  let cur: (typeof leaders)[number] | null = null;
+  const pt = (k: number): Vec => ({ x: num(tags[k][1]), y: num(tags[k + 1]?.[0] === tags[k][0] + 10 ? tags[k + 1][1] : '0') });
+  for (let k = 0; k < tags.length; k++) {
+    const [c, v] = tags[k];
+    const val = v.trim();
+    if (c === 300 && val === 'CONTEXT_DATA{') { inCtx = true; continue; }
+    if (c === 301 && val === '}') { inCtx = false; continue; }
+    if (!inCtx) continue;
+    if (c === 302 && val === 'LEADER{') { inLeader = true; cur = { last: null, dog: { x: 1, y: 0 }, dogLen: 0, lines: [] }; leaders.push(cur); continue; }
+    if (c === 303 && val === '}') { inLeader = false; continue; }
+    if (c === 304 && val === 'LEADER_LINE{') { inLine = true; line = []; continue; }
+    if (c === 305 && val === '}') { inLine = false; if (cur && line.length) cur.lines.push(line); continue; }
+    if (inLine) { if (c === 10) line.push(pt(k)); continue; }
+    if (inLeader && cur) {
+      if (c === 10) cur.last = pt(k);
+      else if (c === 11) cur.dog = pt(k);
+      else if (c === 40) cur.dogLen = num(v);
+      continue;
+    }
+    // context-level values
+    if (c === 40) scale = num(v, 1) || 1;
+    else if (c === 41) textH = num(v, 2.5) || 2.5;
+    else if (c === 140) arrow = num(v, 2.5);
+    else if (c === 304) text = decodeU(v);
+    else if (c === 12) textPos = pt(k);
+    else if (c === 13) textDir = pt(k);
+    else if (c === 43) textW = num(v);
+    else if (c === 171) attach = Math.min(9, Math.max(1, num(v, 1)));
+  }
+  void scale;
+  for (const l of leaders) {
+    const end = l.last;
+    for (const ln of l.lines) {
+      const pts = end ? [...ln, end] : ln;
+      if (pts.length >= 2) {
+        out.push({ type: 'polyline', pts, bulges: pts.map(() => 0), closed: false, ...cm });
+        const tip = pts[0], nx = pts[1];
+        const d = { x: tip.x - nx.x, y: tip.y - nx.y };
+        const len = Math.hypot(d.x, d.y);
+        if (len > 1e-9 && arrow > 0) {
+          const u = { x: d.x / len, y: d.y / len }, n = { x: -u.y, y: u.x };
+          const back = { x: tip.x - u.x * arrow, y: tip.y - u.y * arrow };
+          out.push({ type: 'solid', pts: [tip, { x: back.x + (n.x * arrow) / 6, y: back.y + (n.y * arrow) / 6 }, { x: back.x - (n.x * arrow) / 6, y: back.y - (n.y * arrow) / 6 }], ...cm });
+        }
+      }
+    }
+    if (end && l.dogLen > 0) out.push({ type: 'line', p1: end, p2: { x: end.x + l.dog.x * l.dogLen, y: end.y + l.dog.y * l.dogLen }, ...cm });
+  }
+  if (text && textPos) {
+    const rot = textDir ? Math.atan2(textDir.y, textDir.x) : 0;
+    out.push({ type: 'mtext', p: textPos, h: textH, text, rot, width: textW, attach, ...cm });
+  }
+  return out.length ? out : null;
 }
 
 function convText(rv: RecView, isAttrib: boolean): Omit<TextEnt, 'id'> | null {
