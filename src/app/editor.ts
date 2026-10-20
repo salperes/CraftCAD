@@ -140,6 +140,8 @@ export class Editor {
   cursorScreen: Vec | null = null;
   cursorWorld: Vec = { x: 0, y: 0 };
   cursorPt: Vec = { x: 0, y: 0 };
+  /** True when cursorPt was snapped to the grid, so the crosshair is drawn there. */
+  private gridSnapped = false;
   snapHit: SnapHit | null = null;
   tracking: { from: Vec; to: Vec; full?: boolean }[] = [];
   /** Object snap tracking: acquired points, hover timer, active alignment and its label. */
@@ -536,7 +538,7 @@ export class Editor {
     if (this.hoverId !== null && (!p || p.kind === 'select' || p.kind === 'entity')) hover = this.doc.get(this.hoverId) ?? null;
     const base = p?.kind === 'point' ? p.o.base : undefined;
     return {
-      cursor: this.cursorScreen,
+      cursor: this.cursorScreen && this.gridSnapped ? this.view.toScreen(this.cursorPt) : this.cursorScreen,
       cursorMode: mode,
       snap: this.snapHit && (p?.kind === 'point') ? this.snapHit : null,
       tracking: this.tracking,
@@ -561,6 +563,7 @@ export class Editor {
     this.tracking = [];
     this.trackLabel = null;
     this.trackRay = null;
+    this.gridSnapped = false;
     let pt = w;
     if (p?.kind === 'point' || (!p && this.hotGrip)) {
       const base = p?.kind === 'point' ? p.o.base ?? null : null;
@@ -573,17 +576,24 @@ export class Editor {
       if (tracking) this.acquireHover(this.snapHit);
       const tr = tracking && !this.snapHit ? this.trackPoint(w, base) : null;
       if (tr) pt = tr;
-      else if (!this.snapHit && base) pt = this.constrain(base, w);
-      else if (!this.snapHit && this.settings.snap) pt = this.gridSnap(w);
-      if (!this.snapHit && !tr && base && this.settings.snap && !this.tracking.length && !this.settings.ortho) pt = this.gridSnap(pt);
+      else if (!this.snapHit && this.settings.snap) {
+        // Grid snap moves the crosshair; ORTHO still applies relative to the base point.
+        const g = this.gridSnap(w);
+        pt = base && this.settings.ortho ? this.constrain(base, g) : g;
+        this.gridSnapped = true;
+      } else if (!this.snapHit && base) pt = this.constrain(base, w);
+    } else if (this.settings.snap && p?.kind !== 'text') {
+      pt = this.gridSnap(w);
+      this.gridSnapped = true;
     }
     this.cursorPt = pt;
     // hover highlight
     if (!p || p.kind === 'select' || p.kind === 'entity') {
-      const id = this.pickAt(this.cursorScreen, p?.kind === 'entity' ? p.filter : undefined);
+      const ps = this.gridSnapped ? this.view.toScreen(pt) : this.cursorScreen;
+      const id = this.pickAt(ps, p?.kind === 'entity' ? p.filter : undefined);
       this.hoverId = id;
     } else this.hoverId = null;
-    this.hoverGrip = !p ? this.gripAt(this.cursorScreen) : null;
+    this.hoverGrip = !p ? this.gripAt(this.gridSnapped ? this.view.toScreen(pt) : this.cursorScreen) : null;
     // preview
     if (p?.kind === 'point' && p.o.preview) {
       try {
@@ -779,6 +789,13 @@ export class Editor {
   // -------------------------------------------------------------------------
   // Mouse
 
+  /** In idle and selection prompts the pick point follows the grid-snapped crosshair. */
+  private snapScreen(s: Vec): Vec {
+    const k = this.prompt?.kind;
+    if (!this.settings.snap || this.panning || this.panTool || k === 'point' || k === 'text') return s;
+    return this.view.toScreen(this.gridSnap(this.view.toWorld(s)));
+  }
+
   onMouseMove(s: Vec, buttons: number): void {
     if (this.panning) {
       this.view.panPixels(s.x - this.panning.x, s.y - this.panning.y);
@@ -786,6 +803,7 @@ export class Editor {
       this.redraw();
     }
     this.cursorScreen = s;
+    s = this.snapScreen(s);
     if (this.win) {
       this.win.b = s;
       if (dist(this.win.a, s) > 5 && buttons & 1) this.win.dragged = true;
@@ -810,6 +828,7 @@ export class Editor {
     }
     if (button === 2) return;
     if (this.panTool) { this.panning = { x: s.x, y: s.y }; return; }
+    s = this.snapScreen(s);
     this.updateCursor();
     const p = this.prompt;
     if (p?.kind === 'point') {
@@ -850,7 +869,7 @@ export class Editor {
     if (button === 1 || this.panTool) { this.panning = null; return; }
     if (button === 2) { this.onRightClick(s, shift); return; }
     if (this.win && this.win.dragged) {
-      this.win.b = s;
+      this.win.b = this.snapScreen(s);
       this.finishWindow(shift);
     }
   }

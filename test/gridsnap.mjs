@@ -1,0 +1,23 @@
+// Grid snap check: crosshair and picked points jump to the snap grid (idle, LINE, ORTHO).
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const { chromium } = require(process.argv[2]);
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
+page.on('pageerror', (e) => console.log('pageerror:', e.message));
+await page.goto('http://127.0.0.1:5173/');
+await page.waitForSelector('.ribbon');
+await page.evaluate(() => { localStorage.clear(); const ed = window.craftcad; ed.settings.osnap = false; ed.view.fit({ minX: -20, minY: -20, maxX: 120, maxY: 80 }); ed.redraw(); });
+const box = await (await page.$('.overlay-canvas')).boundingBox();
+const toS = (x, y) => page.evaluate(([x, y]) => window.craftcad.view.toScreen({ x, y }), [x, y]);
+const moveW = async (x, y) => { const s = await toS(x, y); await page.mouse.move(box.x + s.x, box.y + s.y, { steps: 4 }); };
+const clickW = async (x, y) => { await moveW(x, y); await page.mouse.down(); await page.mouse.up(); await page.waitForTimeout(60); };
+const type = async (s) => { await page.keyboard.type(s, { delay: 10 }); await page.keyboard.press('Enter'); await page.waitForTimeout(80); };
+await page.keyboard.press('F9');
+await moveW(13.2, 21.9);
+const idle = await page.evaluate(() => ({ pt: window.craftcad.cursorPt, snap: window.craftcad.settings.snap }));
+await type('L'); await clickW(3.4, 2.1); await clickW(48.7, 31.2);
+await page.keyboard.press('F8'); await clickW(71.1, 38.3); await type('');
+const lines = await page.evaluate(() => [...window.craftcad.doc.entities.values()].filter((e) => e.type === 'line').map((e) => `(${e.p1.x},${e.p1.y})-(${e.p2.x},${e.p2.y})`));
+console.log(JSON.stringify(idle), '\n' + lines.join('\n'));
+await browser.close();
