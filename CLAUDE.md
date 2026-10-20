@@ -2,7 +2,7 @@
 
 Web-based 2D CAD with AutoCAD-style commands, DXF read/write and DWG read/write (via a local converter).
 
-**Mevcut Versiyon:** 0.5.1 (Rev. ID 14)
+**Mevcut Versiyon:** 0.5.2 (Rev. ID 15)
 
 ## Versioning and changelog
 
@@ -29,7 +29,7 @@ UI checks: `test/ui-shot.mjs`, `test/perf.mjs`, `test/otrack.mjs`, `test/gridsna
 ## Layout
 
 - `src/core/` geometry, entities, drawing database, modify algorithms, MTEXT parsing
-- `src/io/` DXF reader/writer, DWG import (`dwg.ts`), conversion API client (`convert.ts`)
+- `src/io/` DXF reader/writer, DWG import (`dwg.ts`), conversion API client (`convert.ts`), MSS Portal embedding bridge (`portal.ts`)
 - `src/app/` editor (prompts, snapping, OTRACK, grips), commands, preferences
 - `src/view/` Canvas 2D renderer and WebGL layer
 - `src/ui/` ribbon, command line, dialogs, palettes, contextual tabs

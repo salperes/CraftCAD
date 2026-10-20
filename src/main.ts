@@ -11,6 +11,7 @@ import { h, showMenu, tooltip, type MenuEntry } from './ui/dom.ts';
 import { layerManager, pickAci, chooseFromList, hatchOptions, editTextInPlace, confirmDialog } from './ui/dialogs.ts';
 import { saveDxfString } from './io/files.ts';
 import { openFile } from './io/dwg.ts';
+import { portalHost } from './io/portal.ts';
 import { converterStatus, serverConvert, SAVE_FORMATS, type SaveFormat } from './io/convert.ts';
 import { saveAsDialog } from './ui/saveas.ts';
 import { aboutDialog, APP_VERSION } from './ui/about.ts';
@@ -106,6 +107,7 @@ function renderTabs(): void {
     ? `CraftCAD &nbsp; <b>Block Editor - ${escapeHtml(ed.blockEdit.name)}</b> &nbsp; (${escapeHtml(ed.doc.fileName)})`
     : `CraftCAD ${APP_VERSION} &nbsp; <b>${escapeHtml(ed.doc.fileName)}</b>`;
   document.title = `${ed.doc.fileName}${ed.doc.modified ? '*' : ''} - CraftCAD ${APP_VERSION}`;
+  portal?.setModified(ed.doc.modified);
 }
 
 // ---------------------------------------------------------------------------
@@ -290,6 +292,9 @@ function updateStatus(): void {
 
 type FileHandle = { name: string; createWritable(): Promise<{ write(d: string | Blob): Promise<void>; close(): Promise<void> }> };
 let fileHandle: FileHandle | null = null;
+// MSS Portal embedding: QSAVE of a drawing opened from the portal goes back to the file server (as DXF).
+const portal = portalHost();
+let portalBound: { readonly: boolean } | null = null;
 /** Format the current drawing is saved in (null = choose default on first save). */
 let currentFormat: SaveFormat | null = null;
 const fmt = (id: string) => SAVE_FORMATS.find((f) => f.id === id)!;
@@ -328,7 +333,8 @@ async function confirmDiscard(): Promise<boolean> {
   return r === 'No';
 }
 
-async function loadFile(file: File, handle: FileHandle | null): Promise<void> {
+async function loadFile(file: File, handle: FileHandle | null, fromPortal: { readonly: boolean } | null = null): Promise<void> {
+  portalBound = null;
   cmdline.print(`Opening ${file.name} (${(file.size / 1024).toFixed(0)} KB)…`, 'info');
   try {
     const t0 = performance.now();
@@ -336,6 +342,7 @@ async function loadFile(file: File, handle: FileHandle | null): Promise<void> {
     const head = isDwg ? new TextDecoder('latin1').decode(new Uint8Array(await file.slice(0, 6).arrayBuffer())) : '';
     const r = await openFile(ed.doc, file, (m) => cmdline.print(m, 'info'));
     fileHandle = handle;
+    portalBound = fromPortal;
     currentFormat = isDwg ? fmt(DWG_VERSION_FMT[head] ?? 'dwg2018') : fmt('dxf2000');
     ed.selection.clear();
     ed.resetSpaces();
@@ -345,7 +352,8 @@ async function loadFile(file: File, handle: FileHandle | null): Promise<void> {
     if (lay) ed.setLayout(lay);
     cmdline.print(`${r.entities} objects${ed.doc.layouts.length ? `, ${ed.doc.layouts.length} layouts` : ''}, ${r.layers} layers, ${r.blocks} blocks (${r.version}, via ${r.via}) loaded in ${((performance.now() - t0) / 1000).toFixed(2)} s`, 'info');
     for (const warn of r.warnings) cmdline.print('  ' + warn, 'info');
-    if (isDwg && !(await converterStatus()).available) cmdline.print('No DWG converter found: saving will use DXF. Install ODA File Converter to save DWG.', 'info');
+    if (fromPortal?.readonly) cmdline.print('Read-only: another user is editing this file. Use Save As to keep a copy on your computer.', 'info');
+    if (!fromPortal && isDwg && !(await converterStatus()).available) cmdline.print('No DWG converter found: saving will use DXF. Install ODA File Converter to save DWG.', 'info');
   } catch (err) {
     console.error(err);
     cmdline.print(`Could not open ${file.name}: ${(err as Error).message}`, 'error');
@@ -377,6 +385,7 @@ async function openDialog(): Promise<void> {
 
 async function saveFile(saveAs: boolean): Promise<void> {
   if (inBlockEditor()) return;
+  if (!saveAs && portal && portalBound) { await saveToPortal(); return; }
   const st = await converterStatus();
   let f = currentFormat ?? (st.available ? fmt('dwg2018') : fmt('dxf2000'));
   if (!f.native && !st.available) {
@@ -430,6 +439,7 @@ async function saveFile(saveAs: boolean): Promise<void> {
     ed.doc.fileName = name;
     ed.doc.modified = false;
     currentFormat = f;
+    portalBound = null;
     cmdline.print(`Saved ${name} (${f.label.replace(/ \(.*/, '')}, ${(blob.size / 1024).toFixed(0)} KB) in ${((performance.now() - t0) / 1000).toFixed(1)} s`, 'info');
   } catch (e) {
     if ((e as Error).name !== 'AbortError') cmdline.print(`Save failed: ${(e as Error).message}`, 'error');
@@ -457,6 +467,23 @@ desktop?.onOpenFile((f) => {
   })();
 });
 
+async function saveToPortal(): Promise<void> {
+  if (portalBound?.readonly) { cmdline.print('This file is read-only (another user is editing it). Use Save As to save a copy.', 'error'); return; }
+  const text = saveDxfString(ed.doc);
+  cmdline.print(`Saving ${ed.doc.fileName} to the file server…`, 'info');
+  try {
+    const r = await portal!.save(ed.doc.fileName, text);
+    if (r.fileName) ed.doc.fileName = r.fileName;
+    ed.doc.modified = false;
+    // The portal keeps the file's format (a DWG is converted back to DWG there).
+    if (/\.dxf$/i.test(ed.doc.fileName)) currentFormat = fmt('dxf2000');
+    cmdline.print(r.message ?? `Saved ${ed.doc.fileName} to the file server`, 'info');
+  } catch (e) {
+    cmdline.print(`Save failed: ${(e as Error).message}`, 'error');
+  }
+  renderTabs();
+}
+
 let untitled = 1;
 async function newDrawing(): Promise<void> {
   if (inBlockEditor() || !(await confirmDiscard())) return;
@@ -465,6 +492,7 @@ async function newDrawing(): Promise<void> {
   ed.doc.fileName = `Drawing${++untitled}.dwg`;
   fileHandle = null;
   currentFormat = null;
+  portalBound = null;
   ed.selection.clear();
   ed.view.fit({ minX: 0, minY: 0, maxX: 420, maxY: 297 });
   ed.doc.emit('all');
@@ -614,3 +642,4 @@ renderTabs();
 ed.idlePrompt();
 cmdline.print('CraftCAD ready. Type a command (LINE, CIRCLE, TRIM…) or press F1 for the list. Open DXF/DWG with Ctrl+O or drag & drop.', 'info');
 (window as unknown as { craftcad: Editor }).craftcad = ed;
+portal?.onLoad((f) => void loadFile(new File([f.data], f.fileName), null, { readonly: f.readonly }));

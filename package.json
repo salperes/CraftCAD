@@ -1,6 +1,6 @@
 {
   "name": "craftcad",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Lightweight web-based 2D CAD with AutoCAD-style commands, DXF and DWG support",
   "license": "GPL-3.0-or-later",
   "private": true,

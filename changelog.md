@@ -1,4 +1,17 @@
 ---------------------------------------------------------
+Rev. ID    : 15
+Version    : 0.5.2
+Rev. Date  : 20.10.2026
+Rev. Time  : 11:01:28
+Rev. Prompt: CraftCAD uygulamasını MSS Portal'a ekle; Ortak Alan'daki DWG/DXF dosyaları varsayılan olarak CraftCAD ile açılsın (portal bağlantısı GitHub deposuna eklensin)
+
+Rev. Report: (
+- Client: MSS Portal gömülü modu (src/io/portal.ts) — portal CraftCAD'i aynı origin iframe'de ?embed=1 ile açar; çizimi postMessage ile gönderir (load), QSAVE çizimi DXF olarak portala geri verir (save → saved), değişiklik durumu bildirilir (modified). Yalnız ebeveyn pencere ve aynı origin'den gelen mesajlar kabul edilir.
+- Client: Portaldan açılan dosya salt okunur gelebilir (başka kullanıcı düzenliyor): QSAVE engellenir, Save As ile yerel kopya alınabilir. Save As / OPEN / NEW portal bağını koparır (sonraki QSAVE yerel davranır).
+- Client: Gömülü olmayan kullanımda davranış değişmedi.
+- Test: npm test ve tsc temiz; portal taklit sayfasıyla (Playwright) DWG yükleme, QSAVE → portal, salt okunur engeli doğrulandı.
+)
+---------------------------------------------------------
 Rev. ID    : 14
 Version    : 0.5.1
 Rev. Date  : 20.10.2026
