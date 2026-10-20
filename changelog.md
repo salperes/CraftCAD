@@ -1,4 +1,16 @@
 ---------------------------------------------------------
+Rev. ID    : 14
+Version    : 0.5.1
+Rev. Date  : 20.10.2026
+Rev. Time  : 09:12:10
+Rev. Prompt: Web tarafını da güncelle
+
+Rev. Report: (
+- Client: Sürüm package.json'dan modül olarak okunuyor (vite define yerine); çalışan dev sunucusu sürüm artışını yeniden başlatmadan gösteriyor
+- Server: /api/health sürümü her istekte package.json'dan okuyor
+- Build: dist/ 0.5.1 ile yeniden derlendi
+)
+---------------------------------------------------------
 Rev. ID    : 13
 Version    : 0.5.0
 Rev. Date  : 20.10.2026

@@ -2,7 +2,7 @@
 
 Web-based 2D CAD with AutoCAD-style commands, DXF read/write and DWG read/write (via a local converter).
 
-**Mevcut Versiyon:** 0.5.0 (Rev. ID 13)
+**Mevcut Versiyon:** 0.5.1 (Rev. ID 14)
 
 ## Versioning and changelog
 

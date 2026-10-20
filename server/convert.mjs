@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
 
-const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+/** Read per request so /api/health follows version bumps without a server restart. */
+const appVersion = () => JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
 /** DWG/DXF versions offered in the UI (ODA names); AutoCAD Core Console uses the year. */
 export const VERSIONS = ['ACAD2018', 'ACAD2013', 'ACAD2010', 'ACAD2007', 'ACAD2004', 'ACAD2000'];
@@ -136,7 +137,7 @@ export async function convertMiddleware(req, res, next) {
   try {
     if (url.pathname === '/api/health') {
       const i = converterInfo();
-      return send(200, JSON.stringify({ status: 'ok', version: VERSION, converter: i.engine }));
+      return send(200, JSON.stringify({ status: 'ok', version: appVersion(), converter: i.engine }));
     }
     if (url.pathname === '/api/convert/status') {
       const i = converterInfo(url.searchParams.has('refresh'));

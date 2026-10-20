@@ -1,6 +1,3 @@
-/** Application version from package.json, injected by Vite (vite.config.ts `define`). */
-declare const __APP_VERSION__: string;
-
 interface CraftcadDesktopFile { path: string; name: string; bytes: Uint8Array }
 
 /** Present only in the Electron app (electron/preload.cjs). */

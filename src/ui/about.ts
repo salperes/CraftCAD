@@ -1,11 +1,13 @@
 // About CraftCAD / What's New: version, converter status and the changelog (changelog.md).
 
 import changelogRaw from '../../changelog.md?raw';
+import { version } from '../../package.json';
 import { converterStatus } from '../io/convert.ts';
 import { h } from './dom.ts';
 import { escapeHtml } from './ribbon.ts';
 
-export const APP_VERSION: string = __APP_VERSION__;
+// Imported (not injected at server start) so a version bump reaches a running dev server.
+export const APP_VERSION: string = version;
 
 interface Entry { rev: string; version: string; date: string; time: string; prompt: string; report: string[] }
 
